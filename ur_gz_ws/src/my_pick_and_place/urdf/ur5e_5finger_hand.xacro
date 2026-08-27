@@ -1,0 +1,183 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="ur5e_with_5finger_hand">
+
+  <!-- =============================== -->
+  <!-- 1. GLOBAL MATERIALS (FIXES CRASH)-->
+  <!-- =============================== -->
+  <material name="dark_grey">
+    <color rgba="0.2 0.2 0.2 1.0"/>
+  </material>
+  <material name="palm_black">
+    <color rgba="0.1 0.1 0.1 1.0"/>
+  </material>
+  <material name="skin_tone">
+    <color rgba="0.85 0.65 0.5 1.0"/>
+  </material>
+  <material name="pad_grey">
+    <color rgba="0.3 0.3 0.3 1.0"/>
+  </material>
+
+  <!-- =============================== -->
+  <!-- 2. SYSTEM INCLUDES & WORLD BASE -->
+  <!-- =============================== -->
+  <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
+
+  <link name="world"/>
+
+  <!-- =============================== -->
+  <!-- 3. UR5e ROBOT INSTANTIATION     -->
+  <!-- =============================== -->
+  <xacro:ur_robot
+    name="ur"
+    tf_prefix=""
+    parent="world"
+    joint_limits_parameters_file="$(find ur_description)/config/ur5e/joint_limits.yaml"
+    kinematics_parameters_file="$(find ur_description)/config/ur5e/default_kinematics.yaml"
+    physical_parameters_file="$(find ur_description)/config/ur5e/physical_parameters.yaml"
+    visual_parameters_file="$(find ur_description)/config/ur5e/visual_parameters.yaml"
+    sim_ignition="true">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:ur_robot>
+
+  <!-- ============================================ -->
+  <!-- 4. ANGLED WRIST ADAPTER (45-Degree Pitch)    -->
+  <!-- ============================================ -->
+  <link name="wrist_angled_adapter">
+    <visual>
+      <origin xyz="0 0 0.02" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.038" length="0.04"/>
+      </geometry>
+      <material name="dark_grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.02" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.038" length="0.04"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.2"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+  </link>
+
+  <joint name="tool0_to_angled_adapter" type="fixed">
+    <parent link="tool0"/>
+    <link child="wrist_angled_adapter"/>
+    <origin xyz="0 0 0" rpy="0 0.7854 0"/>
+  </joint>
+
+  <!-- ============================================ -->
+  <!-- 5. HUMAN HAND PALM BASE LINK                 -->
+  <!-- ============================================ -->
+  <link name="hand_palm">
+    <visual>
+      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.03 0.09 0.08"/>
+      </geometry>
+      <material name="palm_black"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.03 0.09 0.08"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.4"/>
+      <inertia ixx="0.0005" ixy="0" ixz="0" iyy="0.0005" iyz="0" izz="0.0005"/>
+    </inertial>
+  </link>
+
+  <joint name="adapter_to_palm" type="fixed">
+    <parent link="wrist_angled_adapter"/>
+    <link child="hand_palm"/>
+    <origin xyz="0 0 0.04" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ============================================ -->
+  <!-- 6. 2-SEGMENT FINGER MACRO DEFINITION         -->
+  <!-- ============================================ -->
+  <xacro:macro name="human_finger" params="prefix offset_x offset_y offset_z angle_r angle_p angle_y">
+    
+    <!-- Proximal Phalanx -->
+    <link name="${prefix}_proximal">
+      <visual>
+        <origin xyz="0 0 0.02" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="0.007" length="0.04"/>
+        </geometry>
+        <material name="skin_tone"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0.02" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="0.007" length="0.04"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="0.03"/>
+        <inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+      </inertial>
+    </link>
+
+    <joint name="${prefix}_knuckle_joint" type="revolute">
+      <parent link="hand_palm"/>
+      <child link="${prefix}_proximal"/>
+      <origin xyz="${offset_x} ${offset_y} ${offset_z}" rpy="${angle_r} ${angle_p} ${angle_y}"/>
+      <axis xyz="0 1 0"/>
+      <limit lower="0.0" upper="1.57" effort="5.0" velocity="3.0"/>
+    </joint>
+
+    <!-- Distal Phalanx -->
+    <link name="${prefix}_distal">
+      <visual>
+        <origin xyz="0 0 0.015" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="0.005" length="0.03"/>
+        </geometry>
+        <material name="pad_grey"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0.015" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="0.005" length="0.03"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="0.015"/>
+        <inertia ixx="0.000005" ixy="0" ixz="0" iyy="0.000005" iyz="0" izz="0.000005"/>
+      </inertial>
+    </link>
+
+    <joint name="${prefix}_fingertip_joint" type="revolute">
+      <parent link="${prefix}_proximal"/>
+      <child link="${prefix}_distal"/>
+      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+      <limit lower="0.0" upper="1.57" effort="3.0" velocity="3.0"/>
+    </joint>
+
+  </xacro:macro>
+
+  <!-- ============================================ -->
+  <!-- 7. INSTANTIATE 5 FINGERS                     -->
+  <!-- ============================================ -->
+  <xacro:human_finger prefix="thumb"  offset_x="0.015" offset_y="-0.04" offset_z="0.03" angle_r="0.0" angle_p="-0.6" angle_y="-0.5"/>
+  <xacro:human_finger prefix="index"  offset_x="0.0"   offset_y="-0.03" offset_z="0.08" angle_r="0.0" angle_p="0.0"  angle_y="0.0"/>
+  <xacro:human_finger prefix="middle" offset_x="0.0"   offset_y="-0.01" offset_z="0.08" angle_r="0.0" angle_p="0.0"  angle_y="0.0"/>
+  <xacro:human_finger prefix="ring"   offset_x="0.0"   offset_y="0.01"  offset_z="0.08" angle_r="0.0" angle_p="0.0"  angle_y="0.0"/>
+  <xacro:human_finger prefix="pinky"  offset_x="0.0"   offset_y="0.03"  offset_z="0.08" angle_r="0.0" angle_p="0.0"  angle_y="0.0"/>
+
+  <!-- ============================================ -->
+  <!-- 8. GAZEBO SIMULATION PLUGIN                  -->
+  <!-- ============================================ -->
+  <gazebo>
+    <plugin filename="libign_ros2_control-system.so" name="ign_ros2_control::IgnitionROS2ControlPlugin">
+      <parameters>$(find ur_simulation_gz)/config/ur_controllers.yaml</parameters>
+    </plugin>
+  </gazebo>
+
+</robot>

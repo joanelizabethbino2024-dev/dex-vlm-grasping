@@ -1,0 +1,56 @@
+<?xml version="1.0" ?>
+<sdf version="1.7">
+  <model name="apple_08">
+    <pose>0 0 0 0 0 0</pose>
+    <link name="link">
+      <inertial>
+        <mass>0.2</mass>
+        <inertia>
+          <ixx>0.00012435</ixx>
+          <iyy>0.00012435</iyy>
+          <izz>0.00013317</izz>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyz>0</iyz>
+        </inertia>
+      </inertial>
+
+      <collision name="collision">
+        <geometry>
+          <sphere>
+            <radius>0.03987</radius>
+          </sphere>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>0.65</mu>
+              <mu2>0.65</mu2>
+            </ode>
+          </friction>
+          <contact>
+            <ode>
+              <kp>8000.0</kp>
+              <kd>5.0</kd>
+              <min_depth>0.002</min_depth>
+            </ode>
+          </contact>
+        </surface>
+      </collision>
+
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>model://apple_08/meshes/apple_08_v4.obj</uri>
+            <scale>0.04080 0.04080 0.03800</scale>
+          </mesh>
+        </geometry>
+        <material>
+          <ambient>0.431 0.137 0.098 1</ambient>
+          <diffuse>0.431 0.137 0.098 1</diffuse>
+          <specular>0.15 0.15 0.15 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

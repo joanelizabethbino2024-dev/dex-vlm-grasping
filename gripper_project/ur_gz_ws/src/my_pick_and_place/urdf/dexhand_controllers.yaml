@@ -1,0 +1,32 @@
+dexhand_controller:
+  ros__parameters:
+    joints:
+      - R_Index_Pitch
+      - R_Middle_Pitch
+      - R_Ring_Pitch
+      - R_Pinky_Pitch
+      - R_Index_Flexor
+      - R_Middle_Flexor
+      - R_Ring_Flexor
+      - R_Pinky_Flexor
+      - R_Index_DIP
+      - R_Middle_DIP
+      - R_Ring_DIP
+      - R_Pinky_DIP
+      - R_Thumb_Yaw
+      - R_Thumb_Roll
+      - R_Thumb_Flexor
+      - R_Thumb_DIP
+      - R_Index_Yaw
+      - R_Middle_Yaw
+      - R_Ring_Yaw
+      - R_Pinky_Yaw
+      - R_Thumb_Pitch
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: true

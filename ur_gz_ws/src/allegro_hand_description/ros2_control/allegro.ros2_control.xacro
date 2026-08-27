@@ -1,0 +1,65 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="joint_hw" params="joint_num prefix">
+    <joint name="${prefix}joint_${joint_num}">
+      <command_interface name="effort"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:macro name="allegro_ros2_control" params="name prefix port hand_id use_mock_hardware position_filtering velocity_filtering">
+    <ros2_control name="${name}" type="system">
+      <hardware>
+        <xacro:unless value="${use_mock_hardware}">
+          <plugin>allegro_robot_driver/AllegroEffortHardwareInterface</plugin>
+          <param name="port">${port}</param>
+          <param name="hand_id">${hand_id}</param>
+          <param name="position_filtering">${position_filtering}</param>
+          <param name="velocity_filtering">${velocity_filtering}</param>
+          <param name="joint_0_offset">0.0</param>
+          <param name="joint_1_offset">0.0</param>
+          <param name="joint_2_offset">0.0</param>
+          <param name="joint_3_offset">0.0</param>
+          <param name="joint_4_offset">0.0</param>
+          <param name="joint_5_offset">0.0</param>
+          <param name="joint_6_offset">0.0</param>
+          <param name="joint_7_offset">0.0</param>
+          <param name="joint_8_offset">0.0</param>
+          <param name="joint_9_offset">0.0</param>
+          <param name="joint_10_offset">0.0</param>
+          <param name="joint_11_offset">0.0</param>
+          <param name="joint_12_offset">0.0</param>
+          <param name="joint_13_offset">0.0</param>
+          <param name="joint_14_offset">0.0</param>
+          <param name="joint_15_offset">0.0</param>
+        </xacro:unless>
+        <xacro:if value="${use_mock_hardware}">
+          <plugin>mock_components/GenericSystem</plugin>
+          <param name="calculate_dynamics">true</param>
+        </xacro:if>
+      </hardware>
+
+      <xacro:joint_hw joint_num="0" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="1" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="2" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="3" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="4" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="5" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="6" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="7" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="8" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="9" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="10" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="11" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="12" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="13" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="14" prefix="${prefix}"/>
+      <xacro:joint_hw joint_num="15" prefix="${prefix}"/>
+
+    </ros2_control>
+
+  </xacro:macro>
+
+</robot>

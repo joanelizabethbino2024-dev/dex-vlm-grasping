@@ -1,0 +1,14 @@
+# ROS 2 generated files
+**/build/
+**/install/
+**/log/
+
+# Python generated files
+**/__pycache__/
+*.pyc
+
+# Git backup metadata
+**/.git_backup/
+
+# Large/generated visualization files
+*.gv

@@ -1,0 +1,5 @@
+newmtl apple_mat
+Ka 1.0 1.0 1.0
+Kd 1.0 1.0 1.0
+Ks 0.15 0.15 0.15
+map_Kd apple_02_tex.png

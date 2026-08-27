@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="allegro_hand_left">
+    <xacro:arg name="prefix" default=""/>
+
+    <xacro:arg name="port" default="" />
+    <xacro:arg name="hand_id" default="0" />
+    <xacro:arg name="use_mock_hardware" default="false"/>
+
+    <xacro:arg name="position_filtering" default="1.0" />
+    <xacro:arg name="velocity_filtering" default="1.0" />
+
+    <xacro:include filename="$(find allegro_hand_description)/urdf/allegro_hand_description_left.xacro"/>
+    <xacro:include filename="$(find allegro_hand_description)/urdf/allegro_fingertip.xacro"/>
+
+    <xacro:include filename="$(find allegro_hand_description)/ros2_control/allegro.ros2_control.xacro"/>
+
+    <link name="world"></link>
+
+    <xacro:allegro_hand_left prefix="$(arg prefix)" parent="world">
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+    </xacro:allegro_hand_left>
+
+    <xacro:allegro_finger_tip prefix="$(arg prefix)" finger_num="0"/>
+    <xacro:allegro_finger_tip prefix="$(arg prefix)" finger_num="1"/>
+    <xacro:allegro_finger_tip prefix="$(arg prefix)" finger_num="2"/>
+    <xacro:allegro_thumb_tip prefix="$(arg prefix)" finger_num="3"/>
+
+    <!-- ros2_control description -->
+    <xacro:allegro_ros2_control
+        name="allegro_hand_left"
+        prefix="$(arg prefix)"
+        port="$(arg port)"
+        hand_id="$(arg hand_id)"
+        use_mock_hardware="$(arg use_mock_hardware)"
+        position_filtering="$(arg position_filtering)"
+        velocity_filtering="$(arg velocity_filtering)"
+        />
+
+</robot>

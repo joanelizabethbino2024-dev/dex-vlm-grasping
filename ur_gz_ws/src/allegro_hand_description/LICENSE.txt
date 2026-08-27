@@ -1,0 +1,76 @@
+PROPRIETARY SOFTWARE LICENSE AGREEMENT: IMPORTANT : READ CAREFULLY
+By downloading, installing or using Touchlab Limited software products
+contained herein, you indicate your acceptance of and agree to be bound by the terms
+
+and conditions of this Proprietary Software License Agreement. These terms and
+conditions are a legal agreement between the Licensee (you) and Licensor (Touchlab Limited).
+
+IF YOU DO NOT AGREE TO THESE TERMS AND CONDITIONS, DO NOT
+INSTALL, COPY OR USE THE SOFTWARE.
+
+LICENSE. Subject to the provisions contained herein, Touchlab Limited grants to you a non-
+
+exclusive, non-transferable license to use the Software contained herein. You are
+authorized to use the SOFTWARE only for your own use.
+
+DISCLAIMER OF WARRANTIES: YOU AGREE THAT TOUCHLAB LIMITED HAS MADE NO
+EXPRESS WARRANTIES TO YOU REGARDING THE SOFTWARE AND THAT
+THE SOFTWARE IS BEING PROVIDED TO YOU "AS IS" WITHOUT WARRANTY
+OF ANY KIND. TOUCHLAB LIMITED DISCLAIMS ALL WARRANTIES WITH REGARD TO
+THE SOFTWARE, EXPRESS OR IMPLIED, INCLUDING, WITHOUT LIMITATION,
+ANY IMPLIED WARRANTIES OF FITNESS FOR A PARTICULAR PURPOSE,
+MERCHANTABILITY, MERCHANTABLE QUALITY OR NONINFRINGEMENT OF
+THIRD PARTY RIGHTS. In the case where a state or jurisdiction does not allow the
+exclusion of implied warranties, the above limitations may not apply.
+
+LIMIT OF LIABILITY: IN NO EVENT WILL TOUCHLAB LIMITED BE LIABLE TO YOU FOR
+ANY LOSS OF USE, INTERRUPTION OF BUSINESS, OR ANY DIRECT,
+INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES OF ANY
+KIND (INCLUDING LOST PROFITS) REGARDLESS OF THE FORM OF ACTION
+WHETHER IN CONTRACT, TORT (INCLUDING NEGLIGENCE), STRICT
+PRODUCT LIABILITY OR OTHERWISE, EVEN IF TOUCHLAB LIMITED HAS BEEN ADVISED
+OF THE POSSIBILITY OF SUCH DAMAGES. In the case where a state or jurisdiction
+does not allow the exclusion of incidental or consequential damages, the above
+limitations may not apply.
+
+PROTECTION. NOTWITHSTANDING ANY COPYRIGHT NOTICES, THE
+SOFTWARE CONTAINS TRADE SECRETS AND CONFIDENTIAL INFORMATION
+OF TOUCHLAB LIMITED AND ITS SUPPLIERS. THE LICENSEE AGREES NOT TO REVERSE
+COMPILE, REVERSE ENGINEER, DISASSEMBLE, OR MODIFY THE SOFTWARE.
+THE SOFTWARE MAY NOT BE RENTED OR LEASED. THE SOFTWARE MAY
+NOT BE INCORPORATED INTO OR BUNDLED WITH ANY OTHER PRODUCT
+SUCH THAT THE SOFTWARE CEASES TO BE A STAND-ALONE PRODUCT.
+
+
+EXPORT PROVISION.  Licensee acknowledges that the export of the Software is
+subject to Licensor receiving the necessary licenses or approvals for export from the
+United Kingdom.  Licensee agrees that regardless of any disclosure made by Licensee to
+Licensor of an ultimate destination of the SOFTWARE, Licensee will not re-export
+directly or indirectly the SOFTWARE, without first obtaining a license from the United
+Kingdom Government, as required. Licensee shall provide Touchlab Limited with any information,
+certifications or other documents which Licensor may require in connection with the
+export of the SOFTWARE, or any portions or parts thereof, as amended, and the rules and regulations promulgated
+thereunder.
+
+SUCCESSORS AND ASSIGNS.  The Agreement shall be binding on and inure to the
+benefit of the parties, their successors, permitted assigns and legal representatives.
+Licensee may not assign this Agreement without Licensors prior written consent.
+
+TITLE.  This Agreement grants Licensee no title or rights of or to ownership in the
+SOFTWARE or documentation or any corrections, improvements or revisions furnished.
+THIS AGREEMENT DOES NOT INCLUDE THE RIGHT TO SUBLICENSE.
+
+RELIEF.  Licensee acknowledges that any violation of this Agreement by Licensee will
+cause irreparable injury to Licensor, and Licensor shall be entitled to injunctive relief.
+
+GENERAL.  This Agreement merges all prior written and oral communications and
+defines the entire Agreement of the parties concerning the SOFTWARE. All notices
+required under this Agreement or pertaining to modifications to this Agreement shall be
+in writing, including facsimile copies, however, excluding all variations of Electronic
+Mail, and shall be considered given upon personal delivery of the written notice or within
+five (5) days of mailing, postage prepaid and appropriately addressed. This Agreement
+shall be construed in accordance with laws of the Scotland, United Kingdom
+without regard to its conflicts of laws provisions. The failure by either party
+at any time to enforce its rights under this Agreement will not be construed as a waiver of
+such rights, nor will it in any way affect the validity of this Agreement. No waiver by
+either party will be valid unless given in an appropriate writing signed by both parties.
