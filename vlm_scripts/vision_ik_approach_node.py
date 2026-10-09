@@ -25,6 +25,7 @@ gripper_camera_link's URDF axes -- NOT a ROS optical frame convention).
 If the arm consistently moves in the wrong direction relative to the apple,
 flip the sign on X_SIGN / Y_SIGN / Z_SIGN below and re-test.
 """
+import os
 import json
 import math
 
@@ -42,7 +43,7 @@ from ikpy.chain import Chain
 
 FRAGILITY_TOPIC = "/gripper_camera/fragility_analysis"
 ARM_TRAJECTORY_TOPIC = "/joint_trajectory_controller/joint_trajectory"
-URDF_PATH = "/home/tt501/dexproject/vlm_scripts/expanded_robot.urdf"
+URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expanded_robot.urdf")
 
 CAMERA_FRAME = "gripper_camera_link"
 BASE_FRAME = "base_link"

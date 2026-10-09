@@ -44,7 +44,7 @@ RESULT_TOPIC = "/overhead_camera/fragility_analysis"
 JOINT_STATES_TOPIC = "/joint_states"
 
 BASE_FRAME = "base_link"
-URDF_PATH = "/home/tt501/dexproject/vlm_scripts/expanded_robot.urdf"
+URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expanded_robot.urdf")
 YOLO_WEIGHTS_PATH = os.path.expanduser("~/yolov8n.pt")
 
 # Overhead camera is a static, un-articulated model in the world SDF (not

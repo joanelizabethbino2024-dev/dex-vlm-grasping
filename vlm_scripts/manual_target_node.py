@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import argparse
 import numpy as np
 import rclpy
@@ -15,7 +16,7 @@ from rclpy.parameter import Parameter
 ARM_TRAJECTORY_TOPIC = "/joint_trajectory_controller/joint_trajectory"
 HAND_TRAJECTORY_TOPIC = "/dexhand_controller/joint_trajectory"
 JOINT_STATES_TOPIC = "/joint_states"
-URDF_PATH = "/home/tt501/dexproject/vlm_scripts/expanded_robot.urdf"
+URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expanded_robot.urdf")
 BASE_FRAME = "base_link"
 
 ARM_JOINTS = ["shoulder_pan_joint","shoulder_lift_joint","elbow_joint","wrist_1_joint","wrist_2_joint","wrist_3_joint"]

@@ -81,7 +81,7 @@ RELAX_TICK_SEC = 0.5
 RELAX_MIN_FRACTION = 0.55   # don't relax a joint below this fraction of its secure amount
 RELAX_MAX_TICKS = 20
 SLIP_RED_DROP_FRACTION = 0.4  # gripper-camera red-pixel count dropping below this fraction of its post-lift baseline = slip
-OBSERVE_DIR = "/home/tt501/dexproject/vlm_scripts/logs/grasp_observations"
+OBSERVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "grasp_observations")
 
 THUMB_PUSH_SEC = 6.0
 THUMB_PUSH_AMOUNT_PITCH_FLEXOR = 0.5

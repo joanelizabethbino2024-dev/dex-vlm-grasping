@@ -17,6 +17,6 @@ export IGN_GAZEBO_RESOURCE_PATH=$IGN_GAZEBO_RESOURCE_PATH:~/ur_gz_ws/src:~/ur_gz
 
 ros2 launch ur_simulation_gz ur_sim_control.launch.py \
     ur_type:=ur5e \
-    description_file:=/home/tt501/ur_gz_ws/src/my_pick_and_place/urdf/ur5e_dexhand.xacro \
-    controllers_file:=/home/tt501/ur_gz_ws/src/my_pick_and_place/urdf/merged_controllers.yaml \
-    world_file:=/home/tt501/ur_gz_ws/src/apple_gripper_sim/worlds/apple_world.world
+    description_file:=$HOME/ur_gz_ws/src/my_pick_and_place/urdf/ur5e_dexhand.xacro \
+    controllers_file:=$HOME/ur_gz_ws/src/my_pick_and_place/urdf/merged_controllers.yaml \
+    world_file:=$HOME/ur_gz_ws/src/apple_gripper_sim/worlds/apple_world.world

@@ -85,7 +85,7 @@ PITCH_JOINTS = {j for j in HAND_JOINTS if j.endswith("Pitch")}
 FINGER_ALIGN_DURATION_SEC = 1.5
 FINGER_ALIGN_SETTLE_SEC = 0.5
 
-URDF_PATH = "/home/tt501/dexproject/vlm_scripts/expanded_robot.urdf"
+URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expanded_robot.urdf")
 
 WORLD_FRAME = "base_footprint"
 BASE_FRAME = "base_link"
@@ -246,7 +246,7 @@ DESCENT_WAYPOINTS = 5  # intermediate IK solves from approach height down to the
 # achievable position, used only during the open-handed approach/descent.
 PRE_DESCENT_THUMB_YAW_RAD = -0.5
 PRE_DESCENT_THUMB_ROLL_RAD = -0.34
-OBSERVE_DIR_IK = "/home/tt501/dexproject/vlm_scripts/logs/approach_observations"
+OBSERVE_DIR_IK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "approach_observations")
 # ikpy's end frame is at the same point as dexhand_base_link (measured via TF),
 # rotated by a fixed 180 deg about X.
 HAND_FRAME_FROM_IK_FRAME = np.diag([1.0, -1.0, -1.0])

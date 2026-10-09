@@ -45,6 +45,7 @@ direct HTTP/SDK call to a hosted vision model), replace the two methods
 `request_alignment_check()` and `on_alignment_result()` accordingly -- the
 state machine around them does not need to change.
 """
+import os
 import json
 import math
 from enum import Enum, auto
@@ -65,7 +66,7 @@ FRAGILITY_TOPIC = "/overhead_camera/fragility_analysis"
 ALIGNMENT_REQUEST_TOPIC = "/overhead_camera/alignment_check_request"
 ALIGNMENT_RESULT_TOPIC = "/overhead_camera/alignment_check_result"
 ARM_TRAJECTORY_TOPIC = "/joint_trajectory_controller/joint_trajectory"
-URDF_PATH = "/home/tt501/dexproject/vlm_scripts/expanded_robot.urdf"
+URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expanded_robot.urdf")
 
 WORLD_FRAME = "base_footprint"
 BASE_FRAME = "base_link"
