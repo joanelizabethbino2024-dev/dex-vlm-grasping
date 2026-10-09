@@ -1,0 +1,17 @@
+{
+  "apple": {
+    "closure": {
+      "R_Thumb_Flexor": 0.075,
+      "R_Thumb_DIP": 0.075,
+      "R_Index_Flexor": 0.075,
+      "R_Index_DIP": 0.075,
+      "R_Middle_Flexor": 0.075,
+      "R_Middle_DIP": 0.075,
+      "R_Ring_Flexor": 0.075,
+      "R_Ring_DIP": 0.075,
+      "R_Pinky_Flexor": 0.075,
+      "R_Pinky_DIP": 0.075
+    },
+    "timestamp": 1789539676.677717
+  }
+}

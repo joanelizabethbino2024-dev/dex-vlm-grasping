@@ -12,3 +12,4 @@
 
 # Large/generated visualization files
 *.gv
+vlm_scripts/logs/
