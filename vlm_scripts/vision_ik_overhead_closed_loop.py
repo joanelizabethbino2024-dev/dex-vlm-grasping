@@ -180,10 +180,23 @@ SIDE_GRASP_TARGET_ORIENTATION = np.array([
 IK_ALT_SEEDS = [
     [0.0, -1.57, 1.57, -1.57, -1.57, 0.0],
     [1.2, -1.2, 1.5, -1.8, -1.57, 0.0],
-    [1.2, -0.8, 1.8, -2.5, -1.2, 0.0],
+    [1.2, -0.8, 1.8, -2.5, -1.2, 0.0],   # ELBOW-UP: confirmed live (2026-10-09) this one finds elbow~0.5m / wrist_1~0.24m above ground, vs ~0.235m/0.04m for the others -- the others were letting the forearm nearly touch the ground.
     [0.6, -1.4, 1.9, -2.1, -1.9, 0.6],
     [1.57, -1.0, 1.2, -1.7, -1.57, -0.5],
+    [1.0, -0.6, 1.9, -2.3, -1.3, 0.2],   # ELBOW-UP backup, in case the one above doesn't converge for a given target
 ]
+
+# User fix request (2026-10-09): "elbow and forearm touch the ground, blocks
+# the hand from lowering" -- confirmed live, most seeds above converge to
+# wrist_1_joint only 4cm above the floor. Any IK candidate with elbow_joint
+# or wrist_1_joint (the forearm's two ends) below this height is rejected
+# outright during seed selection, not just deprioritized -- see solve_ik.
+SAFE_ARM_HEIGHT_ABOVE_GROUND_M = 0.10
+ARM_SAFETY_CHECK_LINKS = ("elbow_joint", "wrist_1_joint")
+# base_footprint (ground, world Z=0) -> mobile_base_link: z=0 (fixed joint).
+# mobile_base_link -> base_link: z=+0.285 (fixed joint). Confirmed directly
+# from the URDF, not assumed -- base_link sits 0.285m above the ground.
+BASE_LINK_HEIGHT_ABOVE_GROUND_M = 0.285
 
 # REVERTED (2026-09-17): tried porting pocket_grasp_test.py's tilted-approach-
 # specific pocket-aim offset (AIM_DEPTH/PALM_OFFSET/LATERAL/GRASP_DROP, their
@@ -227,7 +240,7 @@ HAND_OFFSET_VECTOR_M = (0.0, 0.0, 0.0)  # only the first IK guess -- iteration i
 # standoff of apple-half-height + 0.75cm directly above the apple, with zero
 # horizontal offset (Y,Z components are the palm center's own local Y,Z --
 # horizontal alignment needs no correction once the rotation is right).
-GRASP_POINT_IN_HAND_M = (0.0641, -0.0042, 0.0407)
+GRASP_POINT_IN_HAND_M = (0.081, 0.002, 0.110)  # recomputed 2026-10-14 via FK sweep of the REAL close-motion trajectory (finger_alignment_node.py's actual CLOSE_AMOUNT_* targets, scaled by each joint's real URDF limits -- not raw radians). The old point's Z (0.0407, the palm's own STL bounding-box Z) put the apple 7cm short of where any finger or thumb ever reaches during closing -- confirmed live: only the pinky ever touched, apple never lifted. New point is where all 4 fingertips (close_frac 0.54-0.64) and the thumb tip (close_frac 0.15-0.27, either side of its yaw/roll swing) are verified to pass within the apple's radius (0.04m) during the real close sweep -- see /tmp scratchpad hand_geometry_sweep4/5.py for the derivation.
 APPLE_HALF_HEIGHT_M = 0.04  # current apple collision box is a 0.08m cube
 APPROACH_HEIGHT_ABOVE_M = 0.10  # waypoint 1: this far above the final pre-close pose, same horizontal position and orientation
 # user request (2026-10-09): raised to the 10-15cm range explicitly, and the
@@ -246,6 +259,7 @@ DESCENT_WAYPOINTS = 5  # intermediate IK solves from approach height down to the
 # achievable position, used only during the open-handed approach/descent.
 PRE_DESCENT_THUMB_YAW_RAD = -0.5
 PRE_DESCENT_THUMB_ROLL_RAD = -0.34
+PRE_DESCENT_THUMB_CURL = 0.65  # RAW radians (same convention as everywhere else in this file: 0.0=straight) for Pitch/Flexor/DIP; 0.6 was the measured minimum to clear the palm envelope, this adds a small margin
 OBSERVE_DIR_IK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "approach_observations")
 # ikpy's end frame is at the same point as dexhand_base_link (measured via TF),
 # rotated by a fixed 180 deg about X.
@@ -346,6 +360,11 @@ class VisionIKOverheadClosedLoopNode(Node):
         self._last_settle_pos = None
         self._settle_callback = None
         self._approach_fk = None
+        self._approach_angles = None
+        self._apple_pos_before_motion = None
+        self._apple_pos_start_of_descent = None
+        self._descent_monitor_timer = None
+        self._descent_contact_seen = {}
         self.latest_detected_base = None  # continuously updated regardless of state (2026-10-09)
         self.latest_hand_effort = {}
         os.makedirs(OBSERVE_DIR_IK, exist_ok=True)
@@ -424,6 +443,8 @@ class VisionIKOverheadClosedLoopNode(Node):
         self._grasp_correction = np.zeros(3)
         self._correction_count = 0
         self._last_settle_pos = None
+        self._apple_pos_before_motion = None
+        self._apple_pos_start_of_descent = None
         self._observe("before_motion")
         self.open_hand_preshape()
         self.begin_pick(target_base)
@@ -443,6 +464,7 @@ class VisionIKOverheadClosedLoopNode(Node):
             self.reset_to_idle()
             return
         self.get_logger().info(f"Approach IK solution (arm joints): {approach_angles}")
+        self._approach_angles = approach_angles
         self.publish_trajectory(approach_angles)
         self.state = PickState.MOVING
 
@@ -456,6 +478,9 @@ class VisionIKOverheadClosedLoopNode(Node):
 
     def _on_approach_settled(self):
         self._observe("approach_settled")
+        hand_joint_names = [n for n in self.latest_joint_positions if n.startswith("R_")]
+        hand_state = {n: round(self.latest_joint_positions[n], 3) for n in sorted(hand_joint_names)}
+        self.get_logger().info(f"[verify] finger/thumb joint states at start of descent: {hand_state}")
         # Re-read the apple's CURRENT position (user request: "target that,
         # not the spawn position") -- self.latest_detected_base is kept
         # continuously fresh by on_fragility_msg regardless of state.
@@ -466,46 +491,90 @@ class VisionIKOverheadClosedLoopNode(Node):
         )
         self.current_target_base = descent_target
 
-        final_angles = self.solve_ik_hand_frame(descent_target)
-        if final_angles is None:
-            self.get_logger().error("Descent IK failed; aborting this pick attempt.")
-            self.reset_to_idle()
-            return
+        # Multi-waypoint Cartesian-straight descent, each one seeded from the
+        # PREVIOUS waypoint's own solution (user: "dont do so much turning"
+        # -- independently re-searching IK_ALT_SEEDS at each waypoint could
+        # land on a different solution branch than its neighbor, producing a
+        # visible extra swing between them instead of a smooth path). Each
+        # is still individually centered on the same fresh x,y via
+        # solve_ik_hand_frame, so the path stays vertically straight.
+        waypoints = []
+        prev_seed = self._approach_angles
+        for k in range(1, DESCENT_WAYPOINTS + 1):
+            frac = k / DESCENT_WAYPOINTS
+            if k == DESCENT_WAYPOINTS:
+                wp_target = descent_target
+            else:
+                wp_target = (descent_target[0], descent_target[1], descent_target[2] + APPROACH_HEIGHT_ABOVE_M * (1 - frac))
+            angles = self.solve_ik_hand_frame(wp_target, seed_override=prev_seed)
+            if angles is None:
+                angles = prev_seed
+            waypoints.append(angles)
+            prev_seed = angles
 
+        final_angles = waypoints[-1]
         ja = [0.0] * len(self.chain.links)
         for i, a in enumerate(final_angles):
             ja[2 + i] = a
         final_wrist = self.chain.forward_kinematics(ja)[:3, 3]
-        approach_wrist = self._settle_target_base
-
-        # Multi-waypoint Cartesian-straight descent: each intermediate Z is
-        # its own independent IK solve at the SAME fresh x,y (via
-        # solve_ik_hand_frame, so each waypoint is individually centered on
-        # the apple, not just hoping joint-space interpolation stays
-        # vertical between 2 far-apart points).
-        waypoints = []
-        for k in range(1, DESCENT_WAYPOINTS + 1):
-            frac = k / DESCENT_WAYPOINTS
-            z = approach_wrist[2] + frac * (final_wrist[2] - approach_wrist[2])
-            if k == DESCENT_WAYPOINTS:
-                angles = final_angles
-            else:
-                intermediate_target = (descent_target[0], descent_target[1], descent_target[2] + APPROACH_HEIGHT_ABOVE_M * (1 - frac))
-                angles = self.solve_ik_hand_frame(intermediate_target)
-                if angles is None:
-                    angles = final_angles
-            waypoints.append(angles)
 
         self.publish_multi_point_trajectory(waypoints)
+
+        # Continuous contact monitor DURING the descent (2026-10-09, user
+        # finding): the before/after snapshot approach missed a transient
+        # bump -- the apple moved ~7.5cm between approach_settled and
+        # descent_settled with nothing flagged, because nothing was
+        # watching WHILE the arm was actually moving. This polls hand joint
+        # effort continuously through the whole descent instead.
+        self._descent_contact_seen = {}
+        self._descent_monitor_timer = self.create_timer(0.3, self._monitor_descent_contact)
 
         self._settle_target_base = tuple(final_wrist)
         self._settle_wait_started = self.get_clock().now().nanoseconds / 1e9
         self._settle_callback = self._on_descent_settled
         self._pending_timer = self.create_timer(SETTLE_POLL_INTERVAL_SEC, self._check_arm_settled)
 
+    def _monitor_descent_contact(self):
+        for name, effort in self.latest_hand_effort.items():
+            if not name.startswith("R_"):
+                continue
+            if abs(effort) > 0.5 and name not in self._descent_contact_seen:
+                self._descent_contact_seen[name] = round(effort, 2)
+                self.get_logger().warning(f"[descent contact] {name} effort={effort:.2f} DURING descent (not at a checkpoint).")
+                with open(self.run_log_path, "a") as f:
+                    f.write(f"[descent_contact] {name} effort={effort:.2f}\n")
+
     def _on_descent_settled(self):
-        self._observe("descent_settled")
+        if self._descent_monitor_timer is not None:
+            self.destroy_timer(self._descent_monitor_timer)
+            self._descent_monitor_timer = None
+        if self._descent_contact_seen:
+            self._observe("descent_settled")
+            self.get_logger().info(f"Contacts detected during descent: {self._descent_contact_seen}")
+        else:
+            self._observe("descent_settled")
+        self._log_arm_link_heights()
+        self._verify_grasp_geometry(self.current_target_base)
         self._on_settle_timer_fired()
+
+    def _log_arm_link_heights(self):
+        """User-requested verification (2026-10-09): print the real height
+        of every arm link at the grasp pose, from the ACTUAL joint_states,
+        not the commanded solution -- confirms only the fingers end up near
+        the ground, not the elbow/forearm."""
+        for name in ARM_JOINTS:
+            if name not in self.latest_joint_positions:
+                self.get_logger().warning("No joint_states yet; can't verify link heights.")
+                return
+        ja = [0.0] * len(self.chain.links)
+        for i, name in enumerate(ARM_JOINTS):
+            ja[2 + i] = self.latest_joint_positions[name]
+        full_fk = self.chain.forward_kinematics(ja, full_kinematics=True)
+        self.get_logger().info("Arm link heights above ground at grasp pose:")
+        for i in range(len(self.chain.links)):
+            h = full_fk[i][2, 3] + BASE_LINK_HEIGHT_ABOVE_GROUND_M
+            flag = " <-- BELOW SAFE HEIGHT" if (self.chain.links[i].name in ARM_SAFETY_CHECK_LINKS and h < SAFE_ARM_HEIGHT_ABOVE_GROUND_M) else ""
+            self.get_logger().info(f"  {self.chain.links[i].name}: {h:.3f}m{flag}")
 
     def _check_arm_settled(self):
         """Poll real forward-kinematics from /joint_states until the gripper
@@ -574,6 +643,139 @@ class VisionIKOverheadClosedLoopNode(Node):
         with open(self.run_log_path, "a") as f:
             f.write(line)
         self.get_logger().info(f"[observe] {line.strip()}")
+        # User tolerance (2026-10-14): apple must move < 5mm before closing.
+        # Checked over BOTH segments separately -- before_motion->
+        # approach_settled (start of descent) and approach_settled->
+        # descent_settled (the descent itself) -- so a failure points at
+        # which phase actually caused it, not just the total.
+        if label == "before_motion" and isinstance(apple_pos, list):
+            self._apple_pos_before_motion = apple_pos
+            self._apple_pos_start_of_descent = None
+        elif label == "approach_settled" and isinstance(apple_pos, list):
+            self._apple_pos_start_of_descent = apple_pos
+            if self._apple_pos_before_motion is not None:
+                disp = np.linalg.norm(np.array(apple_pos) - np.array(self._apple_pos_before_motion))
+                self.get_logger().info(
+                    f"[verify] apple displacement before_motion -> start_of_descent = {disp*1000:.1f}mm "
+                    f"(target <= 5mm): {'PASS' if disp <= 0.005 else 'FAIL'}"
+                )
+        elif label == "descent_settled" and isinstance(apple_pos, list) and self._apple_pos_start_of_descent is not None:
+            disp = np.linalg.norm(np.array(apple_pos) - np.array(self._apple_pos_start_of_descent))
+            verdict = "PASS" if disp <= 0.005 else "FAIL"
+            self.get_logger().info(
+                f"[verify] apple displacement start_of_descent -> descent_settled (the descent itself) = {disp*1000:.1f}mm "
+                f"(target <= 5mm): {verdict}"
+                + (f"  -- contact during this window: {contacts}" if disp > 0.005 and contacts else "")
+            )
+        return apple_pos
+
+    def _hand_local_fk(self):
+        """Small self-contained FK for the thumb tip and 4-finger centroid in
+        the hand's own local frame, using the SAME joint values
+        finger_alignment_node.py actually commands at the align/close-ready
+        posture (duplicated here deliberately -- these two processes don't
+        share state -- must be kept in sync with that file's THUMB_YAW_RAD /
+        THUMB_ROLL_RAD / GRIP_FAN_OUTER_RAD if those ever change)."""
+        import xml.etree.ElementTree as ET
+
+        def rpy_mat(r):
+            a, b, c = r
+            Rx = np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
+            Ry = np.array([[np.cos(b), 0, np.sin(b)], [0, 1, 0], [-np.sin(b), 0, np.cos(b)]])
+            Rz = np.array([[np.cos(c), -np.sin(c), 0], [np.sin(c), np.cos(c), 0], [0, 0, 1]])
+            return Rz @ Ry @ Rx
+
+        def axis_mat(ax, th):
+            x, y, z = ax / np.linalg.norm(ax)
+            c, s = np.cos(th), np.sin(th)
+            C = 1 - c
+            return np.array([[x*x*C+c, x*y*C-z*s, x*z*C+y*s], [y*x*C+z*s, y*y*C+c, y*z*C-x*s], [z*x*C-y*s, z*y*C+x*s, z*z*C+c]])
+
+        root = ET.parse(URDF_PATH).getroot()
+        J = {}
+        for j in root.findall("joint"):
+            n = j.get("name")
+            if not n or not n.startswith("R_"):
+                continue
+            o = j.find("origin")
+            J[n] = (np.array([float(x) for x in o.get("xyz").split()]),
+                    np.array([float(x) for x in o.get("rpy").split()]),
+                    np.array([float(x) for x in j.find("axis").get("xyz").split()]))
+
+        def tip(chain, jv):
+            T = np.eye(4)
+            for n in chain:
+                xyz, r, ax = J[n]
+                M = np.eye(4)
+                M[:3, :3] = rpy_mat(r) @ axis_mat(ax, jv.get(n, 0.0))
+                M[:3, 3] = xyz
+                T = T @ M
+            return T[:3, 3]
+
+        # This verification runs right after descent, BEFORE close_hand's
+        # ramp (2026-10-14) -- so the thumb is still at its PRE_DESCENT pose
+        # (abducted + curled), not the opposed/straight close-ready one.
+        # Using the real current values, not the close-ready ones, so this
+        # check reflects where the thumb actually is at this moment.
+        GRIP_FAN_OUTER_RAD = 0.28
+        unit = GRIP_FAN_OUTER_RAD / 3.0
+        thumb_tip = tip(["R_Thumb_Yaw", "R_Thumb_Roll", "R_Thumb_Pitch", "R_Thumb_Flexor", "R_Thumb_DIP"],
+                        {"R_Thumb_Yaw": PRE_DESCENT_THUMB_YAW_RAD, "R_Thumb_Roll": PRE_DESCENT_THUMB_ROLL_RAD,
+                         "R_Thumb_Pitch": PRE_DESCENT_THUMB_CURL, "R_Thumb_Flexor": PRE_DESCENT_THUMB_CURL, "R_Thumb_DIP": PRE_DESCENT_THUMB_CURL})
+        finger_tips = []
+        for name, yaw in (("Index", -1.5*unit), ("Middle", -0.5*unit), ("Ring", 0.5*unit), ("Pinky", 1.5*unit)):
+            chain = [f"R_{name}_Yaw", f"R_{name}_Pitch", f"R_{name}_Flexor", f"R_{name}_DIP"]
+            finger_tips.append(tip(chain, {f"R_{name}_Yaw": yaw}))
+        finger_centroid = np.mean(finger_tips, axis=0)
+        palm_center_local = np.array([0.0166, -0.0042, 0.0407])  # STL bounding-box center, measured earlier
+        return thumb_tip, finger_centroid, palm_center_local
+
+    def _verify_grasp_geometry(self, apple_base):
+        """User-requested checks (2026-10-14): grasp point (the point under
+        the base of the fingers, GRASP_POINT_IN_HAND_M -- not the geometric
+        palm center) vs apple centroid error, and open-hand span vs apple
+        diameter, both printed with real numbers."""
+        for name in ARM_JOINTS:
+            if name not in self.latest_joint_positions:
+                return
+        ja = [0.0] * len(self.chain.links)
+        for i, name in enumerate(ARM_JOINTS):
+            ja[2 + i] = self.latest_joint_positions[name]
+        fk = self.chain.forward_kinematics(ja)
+        r_hand = fk[:3, :3] @ HAND_FRAME_FROM_IK_FRAME
+        hand_pos = fk[:3, 3]
+
+        thumb_tip_local, finger_centroid_local, palm_center_local = self._hand_local_fk()
+        thumb_tip_world = hand_pos + r_hand @ thumb_tip_local
+        finger_centroid_world = hand_pos + r_hand @ finger_centroid_local
+        grasp_point_world = hand_pos + r_hand @ np.array(GRASP_POINT_IN_HAND_M)
+
+        span = np.linalg.norm(thumb_tip_world - finger_centroid_world)
+        apple_diam = 2 * APPLE_HALF_HEIGHT_M
+        self.get_logger().info(
+            f"[verify] open-hand span (thumb tip to finger centroid, straight) = {span:.3f}m, "
+            f"apple diameter = {apple_diam:.3f}m -- span is measured at the OPEN pose, contact actually "
+            f"happens partway through the close sweep (see GRASP_POINT_IN_HAND_M derivation notes)"
+        )
+        apple = np.array(apple_base)
+        xy_err = np.linalg.norm(grasp_point_world[:2] - apple[:2])
+        self.get_logger().info(
+            f"[verify] grasp point world = ({grasp_point_world[0]:.3f}, {grasp_point_world[1]:.3f}, {grasp_point_world[2]:.3f})  "
+            f"apple center xy = ({apple[0]:.3f}, {apple[1]:.3f})  "
+            f"xy error = {xy_err*1000:.1f}mm (target <= 10mm): {'PASS' if xy_err <= 0.01 else 'FAIL'}"
+        )
+
+        # Item 3 (user, 2026-10-14): neither the (still-abducted/curled)
+        # thumb nor the open fingers should overlap the apple's volume at
+        # this pose -- apple radius + 1cm margin, checked against each tip.
+        apple_r = APPLE_HALF_HEIGHT_M + 0.01
+        thumb_gap = np.linalg.norm(thumb_tip_world - apple)
+        finger_gap = np.linalg.norm(finger_centroid_world - apple)
+        self.get_logger().info(
+            f"[verify] thumb tip to apple center = {thumb_gap:.3f}m, finger centroid to apple center = {finger_gap:.3f}m "
+            f"(need >= {apple_r:.3f}m to not overlap): "
+            f"thumb {'OK' if thumb_gap >= apple_r else 'OVERLAP'}, fingers {'OK' if finger_gap >= apple_r else 'OVERLAP'}"
+        )
 
     def _on_settle_timer_fired(self):
         self._cancel_pending_timer()
@@ -812,16 +1014,24 @@ class VisionIKOverheadClosedLoopNode(Node):
             self.get_logger().error(f"TF transform failed: {e}")
             return None
 
-    def solve_ik_hand_frame(self, target_base):
+    def solve_ik_hand_frame(self, target_base, seed_override=None):
         """Place the wrist so the object lands at GRASP_POINT_IN_HAND_M in the
         HAND's own frame, whatever wrist roll IK picks: solve, read the actual
-        hand rotation from FK, recompute the wrist target, repeat."""
+        hand rotation from FK, recompute the wrist target, repeat.
+
+        seed_override (2026-10-09, user: "dont do so much turning"): when
+        solving a SEQUENCE of nearby waypoints (the descent), re-searching
+        all of IK_ALT_SEEDS at each one can land on a different solution
+        branch from one waypoint to the next, producing a visible extra
+        swing/rotation between them instead of a smooth path. Passing the
+        PREVIOUS waypoint's own solution here skips that search and warm-
+        starts from where the arm already is."""
         target = np.array(target_base, dtype=float)
         g = np.array(GRASP_POINT_IN_HAND_M)
         cmd = target - np.array(HAND_OFFSET_VECTOR_M)  # first guess only
         angles = None
         for it in range(6):
-            angles = self.solve_ik(tuple(cmd))
+            angles = self.solve_ik(tuple(cmd), seed_override=seed_override)
             if angles is None:
                 return None
             ja = [0.0] * len(self.chain.links)
@@ -840,16 +1050,21 @@ class VisionIKOverheadClosedLoopNode(Node):
         )
         return angles
 
-    def solve_ik(self, target_base):
+    def solve_ik(self, target_base, seed_override=None, _retry_pass=False):
         target_pos = np.array(target_base, dtype=float)
-        if ORIENTATION_MODE == "all":
+        if seed_override is not None:
+            seeds = [seed_override]
+        elif ORIENTATION_MODE == "all":
             target_orient = SIDE_GRASP_TARGET_ORIENTATION
             seeds = IK_ALT_SEEDS
         else:
             target_orient = np.array(TARGET_APPROACH_DIRECTION)
             seeds = [IK_SEED_ARM_ANGLES]
+        if seed_override is not None:
+            target_orient = SIDE_GRASP_TARGET_ORIENTATION if ORIENTATION_MODE == "all" else np.array(TARGET_APPROACH_DIRECTION)
 
-        best_angles, best_err = None, None
+        best_angles, best_err = None, None            # best overall (fallback only)
+        best_safe_angles, best_safe_err = None, None  # best among arm-safe candidates -- preferred
         for seed_vals in seeds:
             seed = [0.0] * len(self.chain.links)
             for i, val in enumerate(seed_vals):
@@ -878,10 +1093,56 @@ class VisionIKOverheadClosedLoopNode(Node):
             if best_err is None or err < best_err:
                 best_err = err
                 best_angles = [ik_solution[i] for i in range(2, 8)]
+
+            # Arm-safety check (user request, 2026-10-09): reject -- don't
+            # just deprioritize -- any candidate where the elbow or forearm
+            # (wrist_1) link is below SAFE_ARM_HEIGHT_ABOVE_GROUND_M.
+            # Confirmed live this was happening silently: most seeds here
+            # converge to wrist_1 only 4cm off the floor even though their
+            # position/orientation residual looks fine, so residual alone
+            # can't be trusted to avoid it.
+            full_fk = self.chain.forward_kinematics(ja, full_kinematics=True)
+            link_heights = {
+                self.chain.links[i].name: full_fk[i][2, 3] + BASE_LINK_HEIGHT_ABOVE_GROUND_M
+                for i in range(len(self.chain.links))
+            }
+            arm_safe = all(link_heights.get(name, 0.0) >= SAFE_ARM_HEIGHT_ABOVE_GROUND_M for name in ARM_SAFETY_CHECK_LINKS)
+            if arm_safe and (best_safe_err is None or err < best_safe_err):
+                best_safe_err = err
+                best_safe_angles = [ik_solution[i] for i in range(2, 8)]
+
             if len(seeds) > 1:
+                heights_str = " ".join(f"{n}={link_heights.get(n, 0):.3f}m" for n in ARM_SAFETY_CHECK_LINKS)
                 self.get_logger().info(
-                    f"  seed {seed_vals}: pos_err={pos_err*1000:.1f}mm orient_err={orient_err:.3f}"
+                    f"  seed {seed_vals}: pos_err={pos_err*1000:.1f}mm orient_err={orient_err:.3f} "
+                    f"{heights_str} {'[SAFE]' if arm_safe else '[REJECTED: forearm too low]'}"
                 )
+
+        if best_safe_angles is not None:
+            best_angles, best_err = best_safe_angles, best_safe_err
+        elif seed_override is not None and not _retry_pass:
+            # The continuity seed (previous waypoint's own solution) drifted
+            # into an unsafe elbow-down config with no other candidate to
+            # fall back on. Re-search the full seed list fresh instead of
+            # accepting the unsafe pose -- confirmed live (2026-10-14) this
+            # is what was letting the forearm settle below ground on the
+            # final descent waypoint even though a safe solution existed.
+            self.get_logger().warning(
+                "Continuity seed produced an unsafe (forearm-too-low) solution -- "
+                "re-searching the full seed list for a safe alternative."
+            )
+            retried = self.solve_ik(target_base, seed_override=None, _retry_pass=True)
+            if retried is not None:
+                return retried
+            self.get_logger().warning(
+                "No IK candidate kept the elbow/forearm above the safe height -- "
+                "falling back to the best-residual solution anyway (this grasp attempt may hit the ground)."
+            )
+        elif best_angles is not None:
+            self.get_logger().warning(
+                "No IK candidate kept the elbow/forearm above the safe height -- "
+                "falling back to the best-residual solution anyway (this grasp attempt may hit the ground)."
+            )
 
         if best_angles is None:
             self.get_logger().error("IK solve failed for all seeds.")
@@ -980,6 +1241,17 @@ class VisionIKOverheadClosedLoopNode(Node):
         targets.update(PRE_DESCENT_FAN_RAD)
         targets["R_Thumb_Yaw"] = PRE_DESCENT_THUMB_YAW_RAD
         targets["R_Thumb_Roll"] = PRE_DESCENT_THUMB_ROLL_RAD
+        # Protective thumb curl ONLY (2026-10-09): confirmed live that even
+        # at the best Yaw/Roll, a fully STRAIGHT thumb hits the apple during
+        # descent (R_Thumb_Yaw effort spiked to 37.4, apple pushed ~11cm --
+        # the thumb is simply longer than the palm is thick; swept the full
+        # Pitch/Flexor/DIP range offline and c=0.6 is the minimum that pulls
+        # the tip back within the palm's own envelope). Fingers stay fully
+        # straight (0.0, unchanged above) -- they only grazed at ~0.6
+        # effort, not a real collision; this is thumb-specific. Straightens
+        # back out in finger_alignment_node.py's align step once settled.
+        for j in ("R_Thumb_Pitch", "R_Thumb_Flexor", "R_Thumb_DIP"):
+            targets[j] = PRE_DESCENT_THUMB_CURL
         traj = JointTrajectory()
         traj.joint_names = list(targets.keys())
         point = JointTrajectoryPoint()

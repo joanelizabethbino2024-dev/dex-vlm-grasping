@@ -31,12 +31,20 @@ import rclpy
 import numpy as np
 import cv2
 from cv_bridge import CvBridge
+from ikpy.chain import Chain
 from sensor_msgs.msg import Image
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+URDF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expanded_robot.urdf")
+# Same hand-frame convention as vision_ik_overhead_closed_loop.py (duplicated,
+# these two processes don't share state): ikpy's end-effector frame is offset
+# 180deg about X from the hand's own convenient axes.
+HAND_FRAME_FROM_IK_FRAME = np.diag([1.0, -1.0, -1.0])
+APPLE_RADIUS_M = 0.04  # must match vision_ik_overhead_closed_loop.py's APPLE_HALF_HEIGHT_M
 
 FINGER_ALIGN_TRIGGER_TOPIC = "/pick/ready_for_finger_alignment"
 # Reported back to vision_ik_overhead_closed_loop.py once the full align->
@@ -109,8 +117,12 @@ LIFT_SETTLE_SEC = 1.0    # let fingers finish closing before lifting
 # slightly, and any shift risks disturbing a marginal grip. Negative = up
 # (measured there: shoulder_lift went 0.7142 -> 0.7277 for a 5cm descend,
 # i.e. increasing lowers the wrist).
-LIFT_SHOULDER_LIFT_DELTA_RAD = -0.07  # even gentler -- marginal grips were still breaking at -0.15
+LIFT_SHOULDER_LIFT_DELTA_RAD = -0.07  # (unused now -- see LIFT_HEIGHT_M) single-joint delta only moved the wrist ~3cm, nowhere near the user-required 15cm; replaced by an IK-solved pure-vertical translation (2026-10-14)
 LIFT_DURATION_SEC = 14.0  # slower lift to match the gentler delta
+LIFT_HEIGHT_M = 0.15  # user requirement: lift 15cm
+LIFT_HOLD_CHECK_SEC = 3.0  # how long the apple must stay with the hand to pass
+LIFT_HOLD_TICK_SEC = 0.5
+LIFT_XY_TOLERANCE_M = 0.02  # user requirement: apple stays within 2cm (horizontally) of the grasp point
 
 HAND_JOINTS = [
     "R_Thumb_Pitch", "R_Thumb_Roll", "R_Thumb_Yaw", "R_Thumb_Flexor", "R_Thumb_DIP",
@@ -149,8 +161,8 @@ HAND_JOINT_LIMITS_RAD = {
 # opportunity to catch it off-center and shove it, at the cost of a weaker
 # grip. Prioritizing not-pushing over grip strength right now.
 # Four fingers bend mainly at the KNUCKLE (Pitch), only lightly at the middle/tip joints.
-CLOSE_AMOUNT_PITCH_FLEXOR = 0.55
-CLOSE_AMOUNT_DIP = 0.35
+CLOSE_AMOUNT_PITCH_FLEXOR = 0.9  # pushed further -- thumb now reaches cleanly and gently, fingers still fall short
+CLOSE_AMOUNT_DIP = 0.65
 # DIAGNOSTIC (2026-09-17): every attempt tonight pushed the object in the
 # same direction (increasingly negative Y) regardless of amount or speed --
 # a systematic bias, not random contact noise. The thumb travels the
@@ -158,8 +170,8 @@ CLOSE_AMOUNT_DIP = 0.35
 # sweep through) and is the prime suspect. Isolating it: thumb stays fully
 # extended through the whole close, only the four fingers move, to see
 # whether the systematic push goes away.
-CLOSE_AMOUNT_THUMB_PITCH_FLEXOR = 0.65
-CLOSE_AMOUNT_THUMB_DIP = 0.4
+CLOSE_AMOUNT_THUMB_PITCH_FLEXOR = 0.8
+CLOSE_AMOUNT_THUMB_DIP = 0.55
 
 # Object-size band this hand can plausibly wrap around (matches
 # yolo_depth_detector.py's MIN/MAX_OBJECT_WIDTH_M filter).
@@ -179,8 +191,15 @@ MAX_OBJECT_WIDTH_M = 0.16
 YAW_BASE_OUTER_RAD = 0.22
 MAX_YAW_SPREAD_RAD = 0.12  # additional spread at the largest graspable size
 GRIP_FAN_OUTER_RAD = 0.28  # outer finger yaw = +/-0.14 -- narrowed hard: side_camera showed the wide fan curling AWAY from the apple instead of converging onto it; only the zero-yaw Middle finger ever made contact
-THUMB_YAW_RAD = -0.35
+THUMB_YAW_RAD = -0.35  # opposed/close-ready value -- only reached gradually during close_hand now
 THUMB_ROLL_RAD = -0.20  # rotated further toward opposing the fingers (was -0.10)
+# Must match vision_ik_overhead_closed_loop.py's PRE_DESCENT_THUMB_YAW_RAD /
+# PRE_DESCENT_THUMB_ROLL_RAD -- the thumb's pose is set there once, before
+# descent, and this node must know what it already is to animate FROM it
+# during close (duplicated since the two processes don't share state).
+PRE_DESCENT_THUMB_YAW_RAD = -0.5
+PRE_DESCENT_THUMB_ROLL_RAD = -0.34
+PRE_DESCENT_THUMB_CURL = 0.65  # must match vision_ik_overhead_closed_loop.py's constant of the same name
 
 
 class FingerAlignmentNode(Node):
@@ -205,6 +224,21 @@ class FingerAlignmentNode(Node):
         self.latest_arm_positions = {}
         self.latest_hand_effort = {}
         self._secure_positions = {}
+        self._pre_lift_apple = None
+        self._lift_hold_ok_streak = 0
+
+        # ikpy chain (2026-10-14): needed for an IK-solved pure-vertical lift
+        # (see lift()) and for checking real fingertip/thumb-tip positions
+        # against the apple's ground truth after closing (see
+        # _closed_fingertips_world). Duplicated from
+        # vision_ik_overhead_closed_loop.py since these two processes don't
+        # share state.
+        self.chain = Chain.from_urdf_file(URDF_PATH, base_elements=["base_link"])
+        self.active_mask = [False] * len(self.chain.links)
+        for i in range(2, 8):
+            if i < len(self.active_mask):
+                self.active_mask[i] = True
+        self.chain.active_links_mask = self.active_mask
 
         # Self-observation (2026-10-05, user request): so this node -- and
         # whoever reviews its logs afterward -- can see WHERE and WHY a grasp
@@ -247,13 +281,10 @@ class FingerAlignmentNode(Node):
         mask = (r > 80) & (r > g + 25) & (r > b + 25)
         return float(mask.mean())
 
-    def _observe(self, phase, object_name, extra=None):
-        """Save a gripper_camera + side_camera frame and log joint efforts /
-        red-fraction, tagged with the phase name, so a run can be reviewed
-        frame-by-frame afterward instead of only from the final result."""
-        stamp = time.strftime("%H%M%S")
-        red = self._red_fraction()
-        efforts = {n: round(self.latest_hand_effort.get(n, 0.0), 2) for n in PITCH_FLEXOR_DIP_JOINTS}
+    def _apple_ground_truth(self):
+        """Real apple position from the sim (not vision), via the same `ign
+        topic` method established earlier this project for ground-truth
+        verification. Returns [x,y,z] in world frame, or None on failure."""
         try:
             out = subprocess.run(
                 "ign topic -e -t /world/apple_world/pose/info -n 1",
@@ -261,9 +292,92 @@ class FingerAlignmentNode(Node):
             ).stdout
             m = re.search(r'name: "apple_05".*?position \{(.*?)\}', out, re.S)
             vals = dict(re.findall(r'([xyz]): ([-\d.e]+)', m.group(1))) if m else {}
-            apple_ground_truth = [round(float(vals.get(k, 0.0)), 4) for k in "xyz"]
-        except Exception as e:
-            apple_ground_truth = f"ERROR: {e}"
+            return [round(float(vals.get(k, 0.0)), 4) for k in "xyz"]
+        except Exception:
+            return None
+
+    def _arm_fk(self):
+        """FK of the arm's current /joint_states, in the same frame ikpy
+        uses. Returns (wrist_pos, wrist_rot_ik_frame, joint_array) or None if
+        joint states aren't available yet."""
+        for name in ARM_JOINTS:
+            if name not in self.latest_arm_positions:
+                return None
+        ja = [0.0] * len(self.chain.links)
+        for i, name in enumerate(ARM_JOINTS):
+            ja[2 + i] = self.latest_arm_positions[name]
+        fk = self.chain.forward_kinematics(ja)
+        return fk[:3, 3], fk[:3, :3], ja
+
+    def _closed_fingertips_world(self, hand_positions):
+        """FK for each finger's tip and the thumb tip given ACTUAL commanded
+        joint values (not assumed close-ready ones), transformed into world
+        frame via the arm's current FK. Used to verify fingertips end up
+        BELOW the apple's centroid once closed (point 3, user 2026-10-14),
+        and to estimate the open-hand span (point 4). Joints missing from
+        hand_positions default to 0.0 (straight/open)."""
+        import xml.etree.ElementTree as ET
+
+        def rpy_mat(r):
+            a, b, c = r
+            Rx = np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
+            Ry = np.array([[np.cos(b), 0, np.sin(b)], [0, 1, 0], [-np.sin(b), 0, np.cos(b)]])
+            Rz = np.array([[np.cos(c), -np.sin(c), 0], [np.sin(c), np.cos(c), 0], [0, 0, 1]])
+            return Rz @ Ry @ Rx
+
+        def axis_mat(ax, th):
+            x, y, z = ax / np.linalg.norm(ax)
+            c, s = np.cos(th), np.sin(th)
+            C = 1 - c
+            return np.array([[x*x*C+c, x*y*C-z*s, x*z*C+y*s],
+                              [y*x*C+z*s, y*y*C+c, y*z*C-x*s],
+                              [z*x*C-y*s, z*y*C+x*s, z*z*C+c]])
+
+        root = ET.parse(URDF_PATH).getroot()
+        J = {}
+        for j in root.findall("joint"):
+            n = j.get("name")
+            if not n or not n.startswith("R_"):
+                continue
+            o = j.find("origin")
+            J[n] = (np.array([float(x) for x in o.get("xyz").split()]),
+                    np.array([float(x) for x in o.get("rpy").split()]),
+                    np.array([float(x) for x in j.find("axis").get("xyz").split()]))
+
+        def tip(chain, jv):
+            T = np.eye(4)
+            for n in chain:
+                xyz, r, ax = J[n]
+                M = np.eye(4)
+                M[:3, :3] = rpy_mat(r) @ axis_mat(ax, jv.get(n, 0.0))
+                M[:3, 3] = xyz
+                T = T @ M
+            return T[:3, 3]
+
+        tips_local = {}
+        for name in ("Index", "Middle", "Ring", "Pinky"):
+            chain = [f"R_{name}_Yaw", f"R_{name}_Pitch", f"R_{name}_Flexor", f"R_{name}_DIP"]
+            tips_local[name] = tip(chain, hand_positions)
+        thumb_chain = ["R_Thumb_Yaw", "R_Thumb_Roll", "R_Thumb_Pitch", "R_Thumb_Flexor", "R_Thumb_DIP"]
+        tips_local["Thumb"] = tip(thumb_chain, hand_positions)
+
+        fk = self._arm_fk()
+        if fk is None:
+            return None
+        wrist_pos, wrist_rot, _ = fk
+        r_hand = wrist_rot @ HAND_FRAME_FROM_IK_FRAME
+        return {name: wrist_pos + r_hand @ local for name, local in tips_local.items()}
+
+    def _observe(self, phase, object_name, extra=None):
+        """Save a gripper_camera + side_camera frame and log joint efforts /
+        red-fraction, tagged with the phase name, so a run can be reviewed
+        frame-by-frame afterward instead of only from the final result."""
+        stamp = time.strftime("%H%M%S")
+        red = self._red_fraction()
+        efforts = {n: round(self.latest_hand_effort.get(n, 0.0), 2) for n in PITCH_FLEXOR_DIP_JOINTS}
+        apple_ground_truth = self._apple_ground_truth()
+        if apple_ground_truth is None:
+            apple_ground_truth = "ERROR: no reading"
         line = {"t": stamp, "phase": phase, "object": object_name, "apple_ground_truth": apple_ground_truth, "red_fraction": red, "effort": efforts}
         if extra:
             line.update(extra)
@@ -339,11 +453,20 @@ class FingerAlignmentNode(Node):
             else:
                 amount = CLOSE_AMOUNT_DIP if is_dip else CLOSE_AMOUNT_PITCH_FLEXOR
             targets[name] = lo + amount * (hi - lo)
-            current[name] = 0.0
+            current[name] = PRE_DESCENT_THUMB_CURL if name.startswith("R_Thumb") else 0.0
             frozen[name] = False
             hit_count[name] = 0
             squeeze_ticks[name] = 0
         ticks = {"n": 0}
+
+        # Thumb Yaw/Roll swing happens HERE now, as part of the close motion
+        # (user: "the only finger command after descent is the close") --
+        # starts from the pre-descent abducted pose, ramps toward opposed
+        # over the same tick cadence as the curl, included in every
+        # published message below so it's one continuous close, not a
+        # separate pre-close snap.
+        thumb_yr_current = {"R_Thumb_Yaw": PRE_DESCENT_THUMB_YAW_RAD, "R_Thumb_Roll": PRE_DESCENT_THUMB_ROLL_RAD}
+        thumb_yr_target = {"R_Thumb_Yaw": THUMB_YAW_RAD, "R_Thumb_Roll": THUMB_ROLL_RAD}
 
         def step():
             ticks["n"] += 1
@@ -380,44 +503,91 @@ class FingerAlignmentNode(Node):
                 if current[name] < targets[name]:
                     current[name] = min(targets[name], current[name] + CLOSE_STEP_RAD)
                     any_moving = True
-            self._publish_hand_positions_subset(list(current), current, CLOSE_TICK_SEC)
+
+            for name in thumb_yr_current:
+                if thumb_yr_current[name] < thumb_yr_target[name]:
+                    thumb_yr_current[name] = min(thumb_yr_target[name], thumb_yr_current[name] + CLOSE_STEP_RAD)
+                    any_moving = True
+                elif thumb_yr_current[name] > thumb_yr_target[name]:
+                    thumb_yr_current[name] = max(thumb_yr_target[name], thumb_yr_current[name] - CLOSE_STEP_RAD)
+                    any_moving = True
+
+            publish_positions = dict(current)
+            publish_positions.update(thumb_yr_current)
+            self._publish_hand_positions_subset(list(publish_positions), publish_positions, CLOSE_TICK_SEC)
             if any_moving and ticks["n"] < CLOSE_MAX_TICKS:
                 self._call_once_after(CLOSE_TICK_SEC, step)
             else:
-                fingers_touched = sum(1 for n in squeeze_ticks if squeeze_ticks[n] > 0 and not n.startswith("R_Thumb"))
-                thumb_touched = any(squeeze_ticks[n] > 0 for n in squeeze_ticks if n.startswith("R_Thumb"))
+                # Count DISTINCT fingers touched, not joints -- a single
+                # finger has 3 joints (Pitch/Flexor/DIP) that can each
+                # register contact, which previously miscounted "1 finger
+                # touching" as "3 finger(s) in contact" and let a grasp with
+                # only the pinky actually on the apple proceed to lift.
+                # Confirmed live 2026-10-14: exactly this happened (only
+                # R_Pinky_* touched, logged as "3 finger(s)", apple never
+                # left the table on lift).
+                contact_links = [n for n in squeeze_ticks if squeeze_ticks[n] > 0]
+                touched_finger_names = {n.split("_")[1] for n in contact_links if not n.startswith("R_Thumb")}
+                fingers_touched = len(touched_finger_names)
+                thumb_touched = any(n.startswith("R_Thumb") for n in contact_links)
                 self._secure_positions = dict(current)  # relax phase starts from here
-                if fingers_touched >= 1 and thumb_touched:
+                self.get_logger().info(f"[verify] contact links: {contact_links}")
+                if fingers_touched >= 2 and thumb_touched:
                     self.get_logger().info(
                         f"Grab converged on '{object_name}' after {ticks['n']} ticks -- "
-                        f"thumb AND {fingers_touched} finger(s) in contact (SECURE phase); lifting.")
-                    self._observe("secure_grip_done", object_name)
+                        f"thumb AND {fingers_touched} distinct finger(s) in contact ({sorted(touched_finger_names)}) "
+                        f"(SECURE phase); lifting.")
+                    closed_positions = dict(current)
+                    closed_positions.update(thumb_yr_current)
+                    tips_world = self._closed_fingertips_world(closed_positions)
+                    apple_gt = self._apple_ground_truth()
+                    if tips_world and apple_gt:
+                        apple_z = apple_gt[2]
+                        for name, pos in tips_world.items():
+                            below = pos[2] < apple_z
+                            self.get_logger().info(
+                                f"[verify] {name} tip z = {pos[2]:.3f}m vs apple centroid z = {apple_z:.3f}m: "
+                                f"{'BELOW (OK)' if below else 'ABOVE -- will slip out on lift'}"
+                            )
+                    self._observe("secure_grip_done", object_name, {"contact_links": contact_links})
                     self._call_once_after(LIFT_SETTLE_SEC, lambda: self.lift(object_name))
                 else:
                     self.get_logger().warning(
                         f"NOT lifting '{object_name}' -- apple not confirmed in hand "
-                        f"(thumb_touched={thumb_touched}, fingers_touched={fingers_touched}).")
+                        f"(thumb_touched={thumb_touched}, fingers_touched={fingers_touched} {sorted(touched_finger_names)}, "
+                        f"need >=2 distinct fingers AND thumb).")
                     self._observe("secure_grip_failed", object_name,
-                                  {"thumb_touched": thumb_touched, "fingers_touched": fingers_touched})
+                                  {"thumb_touched": thumb_touched, "fingers_touched": fingers_touched,
+                                   "contact_links": contact_links})
                     self._call_once_after(LIFT_SETTLE_SEC, lambda: self._report_done(object_name))
 
         self._observe("pre_close", object_name)
         step()
 
     def lift(self, object_name):
-        """Raise the arm to test whether the grasp actually holds -- ported
-        from manual_target_node.py's proven approach: change ONLY
-        shoulder_lift_joint by a fixed delta from wherever the arm currently
-        is, not a fresh IK solve (re-solving can shift every joint slightly
-        and disturb a marginal grip)."""
-        missing = [j for j in ARM_JOINTS if j not in self.latest_arm_positions]
-        if missing:
-            self.get_logger().warning(f"No joint_states yet for {missing}; skipping lift.")
+        """Raise the arm LIFT_HEIGHT_M (15cm, user requirement) to test
+        whether the grasp actually holds. REPLACED (2026-10-14) the old
+        single-joint shoulder_lift delta -- that only moved the wrist ~3cm
+        for its -0.07 rad nudge, nowhere near 15cm, and a bigger single-joint
+        delta would also drag the wrist sideways, not purely up. Now solves
+        a real IK target (current wrist position + 0.15m in world Z, same
+        orientation), warm-started from the current joint angles so it stays
+        on the same configuration branch instead of jumping."""
+        fk = self._arm_fk()
+        if fk is None:
+            self.get_logger().warning("No joint_states yet for arm joints; skipping lift.")
             return
-
-        positions = [self.latest_arm_positions[j] for j in ARM_JOINTS]
-        lift_idx = ARM_JOINTS.index("shoulder_lift_joint")
-        positions[lift_idx] += LIFT_SHOULDER_LIFT_DELTA_RAD
+        wrist_pos, wrist_rot, seed_ja = fk
+        target_pos = wrist_pos + np.array([0.0, 0.0, LIFT_HEIGHT_M])
+        try:
+            sol = self.chain.inverse_kinematics(
+                target_position=target_pos, target_orientation=wrist_rot,
+                orientation_mode="all", initial_position=seed_ja,
+            )
+        except Exception as e:
+            self.get_logger().error(f"Lift IK solve failed: {e}; skipping lift.")
+            return
+        positions = [sol[2 + i] for i in range(6)]
 
         traj = JointTrajectory()
         traj.joint_names = ARM_JOINTS
@@ -427,9 +597,50 @@ class FingerAlignmentNode(Node):
         point.time_from_start.nanosec = int((LIFT_DURATION_SEC % 1) * 1e9)
         traj.points.append(point)
         self.arm_traj_pub.publish(traj)
-        self.get_logger().info(f"Lifting to test the grasp on '{object_name}'.")
+        self.get_logger().info(f"Lifting {LIFT_HEIGHT_M*100:.0f}cm (IK-solved vertical) to test the grasp on '{object_name}'.")
+        self._pre_lift_apple = self._apple_ground_truth()
+        self._lift_hold_ok_streak = 0
         self._observe("lift_commanded", object_name)
-        self._call_once_after(LIFT_DURATION_SEC + LIFT_SETTLE_SEC, lambda: self.relax_grip(object_name))
+        self._call_once_after(LIFT_DURATION_SEC + LIFT_SETTLE_SEC, lambda: self._check_lift_held(object_name, 0))
+
+    def _check_lift_held(self, object_name, tick):
+        """User requirement: pass only if the apple rises with the hand and
+        stays within 2cm (horizontally) of its pre-lift position for 3s,
+        checked against GROUND TRUTH (ign topic), not the vision-only
+        red_fraction signal the old check relied on."""
+        apple = self._apple_ground_truth()
+        pre = self._pre_lift_apple
+        if apple is None or pre is None:
+            self.get_logger().warning(f"[lift check] tick {tick}: no ground-truth reading -- treating as FAIL.")
+            ok = False
+            xy_drift = dz = None
+        else:
+            dx, dy, dz = apple[0] - pre[0], apple[1] - pre[1], apple[2] - pre[2]
+            xy_drift = (dx ** 2 + dy ** 2) ** 0.5
+            ok = xy_drift <= LIFT_XY_TOLERANCE_M and dz >= LIFT_HEIGHT_M * 0.5
+            self.get_logger().info(
+                f"[lift check] tick {tick}: apple={apple} xy_drift={xy_drift*1000:.1f}mm "
+                f"(need <={LIFT_XY_TOLERANCE_M*1000:.0f}mm) dz={dz*1000:.1f}mm "
+                f"(need >={LIFT_HEIGHT_M*500:.0f}mm): {'OK' if ok else 'FAIL'}"
+            )
+        self._observe(f"lift_check_{tick}", object_name, {"apple_ground_truth": apple, "xy_drift_m": xy_drift, "dz_m": dz, "ok": ok})
+        if not ok:
+            self._lift_hold_ok_streak = 0
+            self.get_logger().warning(
+                f"LIFT CHECK FAILED at tick {tick} -- apple did not stay with the hand "
+                f"within {LIFT_XY_TOLERANCE_M*100:.0f}cm while rising >= {LIFT_HEIGHT_M*50:.0f}cm."
+            )
+            self._call_once_after(LIFT_SETTLE_SEC, lambda: self.relax_grip(object_name))
+            return
+        self._lift_hold_ok_streak += 1
+        if self._lift_hold_ok_streak * LIFT_HOLD_TICK_SEC >= LIFT_HOLD_CHECK_SEC:
+            self.get_logger().info(
+                f"LIFT CHECK PASSED: apple stayed within {LIFT_XY_TOLERANCE_M*100:.0f}cm of its pre-lift "
+                f"position for {LIFT_HOLD_CHECK_SEC:.1f}s while rising with the hand."
+            )
+            self._call_once_after(LIFT_SETTLE_SEC, lambda: self.relax_grip(object_name))
+            return
+        self._call_once_after(LIFT_HOLD_TICK_SEC, lambda: self._check_lift_held(object_name, tick + 1))
 
     def relax_grip(self, object_name):
         """Phase 2 of the user-requested force profile: grip was SECURE
@@ -528,8 +739,17 @@ class FingerAlignmentNode(Node):
         # (joint limit is 0.349), four equal steps, so the fingers are spread
         # around the object instead of bunched together.
         unit = GRIP_FAN_OUTER_RAD / 3.0
+        # THUMB EXCLUDED from this message (2026-10-14, user: "no finger or
+        # thumb opening command may be sent once the descent starts or after
+        # it ends -- the only finger command after descent is the close").
+        # Confirmed live this align-time swing (from the descent-safe
+        # abducted pose to this opposed one) was itself what hit the apple
+        # -- the very first close tick showed effort 15.6 on the thumb
+        # before it had moved at all, meaning it was already touching right
+        # after this swing. The thumb now stays at its pre-descent pose
+        # (set once, before descent, held through descent AND align) and
+        # only moves as part of close_hand's close motion below.
         yaw_roll = {
-            "R_Thumb_Roll": THUMB_ROLL_RAD, "R_Thumb_Yaw": THUMB_YAW_RAD,
             # Signs verified against the URDF: NEGATIVE Index/Middle and POSITIVE
             # Ring/Pinky spread the fingertips apart (the opposite converges them).
             "R_Index_Yaw": -1.5 * unit,
@@ -537,30 +757,41 @@ class FingerAlignmentNode(Node):
             "R_Ring_Yaw": 0.5 * unit,
             "R_Pinky_Yaw": 1.5 * unit,
         }
-        self._yaw_roll_positions = yaw_roll  # close_hand reuses this -- don't re-derive it
+        self._yaw_roll_positions = dict(yaw_roll)
+        self._yaw_roll_positions["R_Thumb_Roll"] = PRE_DESCENT_THUMB_ROLL_RAD
+        self._yaw_roll_positions["R_Thumb_Yaw"] = PRE_DESCENT_THUMB_YAW_RAD
 
-        # Fully straight (Pitch AND Flexor/DIP all 0) -- REVERTED (2026-09-17)
-        # from keeping a four-finger pre-curl here: that ran end-to-end but
-        # still pushed the object. Fully straight through align was the ONE
-        # configuration confirmed, repeatedly, to leave the object completely
-        # undisturbed. Only Yaw/Roll (lateral spread) is this node's job here;
-        # curling only happens in the single decisive close_hand grab below.
-        #
-        # Sent as TWO separate messages, not one combined one -- see
-        # _publish_hand_positions_subset for why (Pitch staying at 0 visibly
-        # bulged mid-motion when bundled with Yaw actually moving).
-        straight_positions = {name: 0.0 for name in PITCH_FLEXOR_DIP_JOINTS}
-        # One combined message (a second message would replace the first
-        # before it moves and freeze the claw curl at 0).
+        # Fingers only (thumb Pitch/Flexor/DIP also excluded -- it keeps its
+        # pre-descent curl here, straightens only during the close below).
+        straight_positions = {name: 0.0 for name in PITCH_FLEXOR_DIP_JOINTS if not name.startswith("R_Thumb")}
         combined = dict(straight_positions)
         combined.update(yaw_roll)
-        self._publish_hand_positions(combined, ALIGN_DURATION_SEC)
+        self._publish_hand_positions_subset(list(combined.keys()), combined, ALIGN_DURATION_SEC)
 
         size_desc = f"{real_size_m:.3f}m" if real_size_m is not None else "unknown size"
         self.get_logger().info(
             f"Aligned straight fingers around '{object_name}' ({size_desc}, "
             f"yaw spread {spread:.3f} rad)."
         )
+
+        # User requirement (2026-10-14, point 4): report the open-hand span
+        # vs the apple's diameter. This is measured at the fully-open/straight
+        # pose, so it's a conservative lower bound -- actual contact happens
+        # partway through the close sweep (see GRASP_POINT_IN_HAND_M's
+        # derivation notes in vision_ik_overhead_closed_loop.py), so a span
+        # smaller than the apple's diameter here does NOT by itself mean the
+        # grasp is infeasible.
+        open_positions = {"R_Thumb_Yaw": PRE_DESCENT_THUMB_YAW_RAD, "R_Thumb_Roll": PRE_DESCENT_THUMB_ROLL_RAD}
+        open_positions.update(yaw_roll)
+        open_tips = self._closed_fingertips_world(open_positions)
+        if open_tips:
+            span = float(np.linalg.norm(open_tips["Thumb"] - open_tips["Middle"]))
+            apple_diam = 2 * APPLE_RADIUS_M
+            self.get_logger().info(
+                f"[verify] open-hand span (thumb to middle fingertip) = {span:.3f}m, "
+                f"apple diameter = {apple_diam:.3f}m."
+            )
+
         # Close/lift REMOVED (2026-09-17) per explicit request: every close
         # variation tried tonight (staged pre-curl, single fast grab, slow
         # gentle grab, thumb isolated) pushed the object without ever
