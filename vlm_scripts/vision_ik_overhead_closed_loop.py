@@ -259,7 +259,45 @@ DESCENT_WAYPOINTS = 5  # intermediate IK solves from approach height down to the
 # achievable position, used only during the open-handed approach/descent.
 PRE_DESCENT_THUMB_YAW_RAD = -0.5
 PRE_DESCENT_THUMB_ROLL_RAD = -0.34
-PRE_DESCENT_THUMB_CURL = 0.95  # RAISED 0.65 -> 0.95 (2026-10-16, must match finger_alignment_node.py's constant of the same name): 0.65 was tuned against the OLD GRASP_POINT_IN_HAND_M; after relocating the grasp point, 0.65 produced a hard live thumb-apple collision during descent (confirmed: effort -21.94, apple displaced 22mm). FK segment-distance sweep showed 0.65 was only ~0.056m clear (apple radius 0.04m) at the new point -- not enough real margin. 0.95 gives ~0.068m. See finger_alignment_node.py's close_hand() thumb_curl_reversed comment for how contact is still achieved: the thumb now ramps DOWN from this resting value during close (not up), since FK shows its closest approach to the apple happens at a MODERATE curl (~0.3-0.4), not the max.
+PRE_DESCENT_THUMB_CURL = 0.95  # the curl the thumb reaches by the END of DESCEND (see PRESHAPE_THUMB_CURL below for where it STARTS). Must match finger_alignment_node.py's constant of the same name -- close_hand()'s thumb_curl_reversed logic starts from this value. RAISED 0.65 -> 0.95 (2026-10-16): 0.65 was tuned against the OLD GRASP_POINT_IN_HAND_M; after relocating the grasp point, 0.65 produced a hard live thumb-apple collision during descent (confirmed: effort -21.94, apple displaced 22mm). FK segment-distance sweep showed 0.65 was only ~0.056m clear (apple radius 0.04m) at the new point -- not enough real margin. 0.95 gives ~0.068m. See finger_alignment_node.py's close_hand() thumb_curl_reversed comment for how contact is still achieved: the thumb ramps DOWN from this resting value during close (not up), since FK shows its closest approach to the apple happens at a MODERATE curl (~0.3-0.4), not the max.
+
+# ---------------------------------------------------------------------------
+# PRESHAPE / DESCEND config (2026-10-16, user request: "thumb stays OPEN and
+# OPPOSED until the hand is in position, then all digits close together" --
+# one config block, not scattered magic numbers).
+#
+# Investigated first (per user's explicit request) before changing anything:
+# the thumb was NOT closing due to a bug -- open_hand_preshape() was setting
+# it to a heavily-curled rest pose (PRE_DESCENT_THUMB_CURL) in ONE command
+# before the arm ever starts moving, and holding it there (no hand joints are
+# ever included in the descent's own trajectory -- publish_multi_point_
+# trajectory only ever sets ARM_JOINTS). That curl was a deliberate,
+# twice-independently-confirmed-live safety fix: an extended thumb hits the
+# apple during the final approach at this hand's geometry (collision #1,
+# 2026-10-09, effort 37.4; collision #2, 2026-10-16 after the grasp point
+# moved, effort -21.94). A fully-open thumb through the WHOLE descent isn't
+# safe here.
+#
+# ATTEMPTED resolution (same day, reverted): start PRESHAPE with the thumb
+# "mostly extended" and ramp the curl UP defensively DURING descend,
+# synchronized with the arm's DESCENT_WAYPOINTS, plus a slight finger
+# pre-curl so fingers come down around the apple's sides. FK-verified
+# (combined_descend_close_check.py) clear at every intermediate point (worst
+# case 0.068m) -- but LIVE testing showed a WORSE collision than the
+# previous constant-curl approach: effort spikes on the thumb AND Pinky/
+# Middle/Index during descent (fingers were independently confirmed safe
+# fully straight; the slight pre-curl is the prime suspect). This offline FK
+# model (zero-thickness line segments) has now underestimated real mesh
+# collision risk multiple times this session -- not trustworthy enough for
+# margins this fine. REVERTED: open_hand_preshape() holds the thumb at
+# PRE_DESCENT_THUMB_CURL constant through PRESHAPE+DESCEND (no ramp, see its
+# docstring), fingers stay fully straight (0.0). These two constants are
+# kept (unused in the current flow) so a future, more conservative attempt
+# at "thumb open longer" doesn't have to re-derive this from scratch.
+PRESHAPE_THUMB_CURL = 0.15
+PRESHAPE_FINGER_CURL = 0.2
+HAND_SETTLE_TOLERANCE_RAD = 0.05  # PRESHAPE settle check: how close hand joints must get to their targets
+HAND_SETTLE_TIMEOUT_SEC = 3.0     # PRESHAPE settle check: give up and proceed anyway after this long
 OBSERVE_DIR_IK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "approach_observations")
 # ikpy's end frame is at the same point as dexhand_base_link (measured via TF),
 # rotated by a fixed 180 deg about X.
@@ -365,6 +403,9 @@ class VisionIKOverheadClosedLoopNode(Node):
         self._apple_pos_start_of_descent = None
         self._descent_monitor_timer = None
         self._descent_contact_seen = {}
+        self._preshape_wait_started = 0.0
+        self._preshape_target_base = None
+        self._preshape_targets = {}
         self.latest_detected_base = None  # continuously updated regardless of state (2026-10-09)
         self.latest_hand_effort = {}
         os.makedirs(OBSERVE_DIR_IK, exist_ok=True)
@@ -447,7 +488,9 @@ class VisionIKOverheadClosedLoopNode(Node):
         self._apple_pos_start_of_descent = None
         self._observe("before_motion")
         self.open_hand_preshape()
-        self.begin_pick(target_base)
+        self._preshape_wait_started = self.get_clock().now().nanoseconds / 1e9
+        self._preshape_target_base = target_base
+        self._pending_timer = self.create_timer(SETTLE_POLL_INTERVAL_SEC, self._check_preshape_settled)
 
     def begin_pick(self, target_base):
         """Stage 1 of 2 (user request, 2026-10-09): move to a point
@@ -477,62 +520,41 @@ class VisionIKOverheadClosedLoopNode(Node):
         self._pending_timer = self.create_timer(SETTLE_POLL_INTERVAL_SEC, self._check_arm_settled)
 
     def _on_approach_settled(self):
+        """DESCEND now ENDS here, at APPROACH_HEIGHT_ABOVE_M above the final
+        grasp point (2026-10-16, user: "don't let the thumb close while
+        descending, keep the palm open"). REMOVED the second multi-waypoint
+        Cartesian descent that used to continue all the way to the final
+        depth with a fast, OPEN-LOOP arm trajectory and a static/ramping
+        hand posture -- that's what made collisions during this stage
+        dangerous: no contact feedback until the damage was already done
+        (confirmed live, repeatedly, across several curl schedules this
+        session, including the one FK had predicted safe).
+
+        The remaining descent to the actual grasp depth now happens inside
+        finger_alignment_node.py's descend_and_close(), which moves in small
+        steps under the SAME effort-threshold contact detection that
+        close_hand() already uses safely for the digits -- so a thumb that's
+        genuinely open the whole time (PRESHAPE curl, unchanged since this
+        point) gets caught gently on first contact instead of swept into a
+        hard, fast collision. This hands off earlier than before, but
+        otherwise reuses the SAME handoff vision_ik would have sent once the
+        old descent finished (see _on_settle_timer_fired)."""
         self._observe("approach_settled")
         hand_joint_names = [n for n in self.latest_joint_positions if n.startswith("R_")]
         hand_state = {n: round(self.latest_joint_positions[n], 3) for n in sorted(hand_joint_names)}
-        self.get_logger().info(f"[verify] finger/thumb joint states at start of descent: {hand_state}")
+        self.get_logger().info(f"[phase] DESCEND complete (stopped at APPROACH_HEIGHT_ABOVE_M) -- thumb/finger joint states: {hand_state}")
         # Re-read the apple's CURRENT position (user request: "target that,
         # not the spawn position") -- self.latest_detected_base is kept
-        # continuously fresh by on_fragility_msg regardless of state.
+        # continuously fresh by on_fragility_msg regardless of state. This is
+        # now the target finger_alignment_node.py's descend_and_close() will
+        # aim for.
         descent_target = self.latest_detected_base or self.current_target_base
         self.get_logger().info(
-            f"Descending to freshly-detected target {tuple(round(v,3) for v in descent_target)} "
-            f"(original was {tuple(round(v,3) for v in self.current_target_base)})."
+            f"Handing off to finger_alignment_node.py for the final approach, targeting "
+            f"{tuple(round(v,3) for v in descent_target)} (original was {tuple(round(v,3) for v in self.current_target_base)})."
         )
         self.current_target_base = descent_target
-
-        # Multi-waypoint Cartesian-straight descent, each one seeded from the
-        # PREVIOUS waypoint's own solution (user: "dont do so much turning"
-        # -- independently re-searching IK_ALT_SEEDS at each waypoint could
-        # land on a different solution branch than its neighbor, producing a
-        # visible extra swing between them instead of a smooth path). Each
-        # is still individually centered on the same fresh x,y via
-        # solve_ik_hand_frame, so the path stays vertically straight.
-        waypoints = []
-        prev_seed = self._approach_angles
-        for k in range(1, DESCENT_WAYPOINTS + 1):
-            frac = k / DESCENT_WAYPOINTS
-            if k == DESCENT_WAYPOINTS:
-                wp_target = descent_target
-            else:
-                wp_target = (descent_target[0], descent_target[1], descent_target[2] + APPROACH_HEIGHT_ABOVE_M * (1 - frac))
-            angles = self.solve_ik_hand_frame(wp_target, seed_override=prev_seed)
-            if angles is None:
-                angles = prev_seed
-            waypoints.append(angles)
-            prev_seed = angles
-
-        final_angles = waypoints[-1]
-        ja = [0.0] * len(self.chain.links)
-        for i, a in enumerate(final_angles):
-            ja[2 + i] = a
-        final_wrist = self.chain.forward_kinematics(ja)[:3, 3]
-
-        self.publish_multi_point_trajectory(waypoints)
-
-        # Continuous contact monitor DURING the descent (2026-10-09, user
-        # finding): the before/after snapshot approach missed a transient
-        # bump -- the apple moved ~7.5cm between approach_settled and
-        # descent_settled with nothing flagged, because nothing was
-        # watching WHILE the arm was actually moving. This polls hand joint
-        # effort continuously through the whole descent instead.
-        self._descent_contact_seen = {}
-        self._descent_monitor_timer = self.create_timer(0.3, self._monitor_descent_contact)
-
-        self._settle_target_base = tuple(final_wrist)
-        self._settle_wait_started = self.get_clock().now().nanoseconds / 1e9
-        self._settle_callback = self._on_descent_settled
-        self._pending_timer = self.create_timer(SETTLE_POLL_INTERVAL_SEC, self._check_arm_settled)
+        self._on_settle_timer_fired()
 
     def _monitor_descent_contact(self):
         for name, effort in self.latest_hand_effort.items():
@@ -553,6 +575,11 @@ class VisionIKOverheadClosedLoopNode(Node):
             self.get_logger().info(f"Contacts detected during descent: {self._descent_contact_seen}")
         else:
             self._observe("descent_settled")
+        thumb_now = {
+            j: round(self.latest_joint_positions.get(j, float("nan")), 3)
+            for j in ("R_Thumb_Pitch", "R_Thumb_Flexor", "R_Thumb_DIP", "R_Thumb_Yaw", "R_Thumb_Roll")
+        }
+        self.get_logger().info(f"[phase] DESCEND complete -- thumb joint positions: {thumb_now} (target curl {PRE_DESCENT_THUMB_CURL})")
         self._log_arm_link_heights()
         self._verify_grasp_geometry(self.current_target_base)
         self._on_settle_timer_fired()
@@ -602,6 +629,31 @@ class VisionIKOverheadClosedLoopNode(Node):
                 "proceeding anyway."
             )
             callback()
+
+    def _check_preshape_settled(self):
+        """PRESHAPE settle check (2026-10-16, user request: tolerance check,
+        not a fixed sleep): poll real /joint_states until the thumb's curl
+        joints and Yaw/Roll actually reach their PRESHAPE targets, instead of
+        assuming the 0.3s trajectory duration was enough."""
+        now = self.get_clock().now().nanoseconds / 1e9
+        elapsed = now - self._preshape_wait_started
+        check_joints = {
+            "R_Thumb_Pitch": 0.0, "R_Thumb_Flexor": 0.0,
+            "R_Thumb_DIP": 0.0, "R_Thumb_Yaw": PRE_DESCENT_THUMB_YAW_RAD,
+            "R_Thumb_Roll": PRE_DESCENT_THUMB_ROLL_RAD,
+        }
+        have_all = all(j in self.latest_joint_positions for j in check_joints)
+        if have_all:
+            worst = max(abs(self.latest_joint_positions[j] - target) for j, target in check_joints.items())
+            if worst <= HAND_SETTLE_TOLERANCE_RAD:
+                self._cancel_pending_timer()
+                self.get_logger().info(f"[phase] PRESHAPE settled (worst joint offset {worst:.3f}rad, {elapsed:.1f}s).")
+                self.begin_pick(self._preshape_target_base)
+                return
+        if elapsed >= HAND_SETTLE_TIMEOUT_SEC:
+            self._cancel_pending_timer()
+            self.get_logger().warning(f"PRESHAPE did not confirm settling within {HAND_SETTLE_TIMEOUT_SEC:.0f}s; proceeding anyway.")
+            self.begin_pick(self._preshape_target_base)
 
     def _compute_gripper_fk_position(self):
         for name in ARM_JOINTS:
@@ -1179,6 +1231,31 @@ class VisionIKOverheadClosedLoopNode(Node):
         self.traj_pub.publish(traj)
         self.get_logger().info(f"Published {n}-waypoint straight-down descent trajectory.")
 
+    def publish_thumb_curl_ramp(self, n_waypoints):
+        """Synchronized DEFENSIVE thumb curl-up during DESCEND (2026-10-16):
+        ramps Pitch/Flexor/DIP from PRESHAPE_THUMB_CURL (mostly extended,
+        set by open_hand_preshape) to PRE_DESCENT_THUMB_CURL (the
+        FK-verified safe curl at the final depth) in lockstep with the arm's
+        own DESCENT_WAYPOINTS, same n and same MOVE_DURATION_SEC timebase as
+        publish_multi_point_trajectory, so the thumb is never more extended
+        than is safe for its current height -- see the PRESHAPE/DESCEND
+        config block's comment for the FK verification this schedule is
+        based on (combined_descend_close_check.py, worst-case clearance
+        0.068m at any intermediate point)."""
+        thumb_joints = ["R_Thumb_Pitch", "R_Thumb_Flexor", "R_Thumb_DIP"]
+        traj = JointTrajectory()
+        traj.joint_names = thumb_joints
+        for k in range(1, n_waypoints + 1):
+            frac = k / n_waypoints
+            curl = PRESHAPE_THUMB_CURL + frac * (PRE_DESCENT_THUMB_CURL - PRESHAPE_THUMB_CURL)
+            t = MOVE_DURATION_SEC * k / n_waypoints
+            point = JointTrajectoryPoint()
+            point.positions = [curl, curl, curl]
+            point.time_from_start.sec = int(t)
+            point.time_from_start.nanosec = int((t % 1) * 1e9)
+            traj.points.append(point)
+        self.hand_traj_pub.publish(traj)
+
     def publish_two_point_trajectory(self, approach_angles, final_angles):
         """Waypoint 1 (approach, above the apple) then waypoint 2 (final
         pre-close pose) in ONE trajectory message, so the controller
@@ -1203,55 +1280,37 @@ class VisionIKOverheadClosedLoopNode(Node):
         )
 
     def open_hand_preshape(self):
-        """Fully straight -- Pitch, Flexor, DIP, thumb included, all at 0.
-        REVERTED (2026-09-17) from a modest four-finger pre-curl ported from
-        pocket_grasp_test.py: that version ran end-to-end but still pushed
-        the object ~0.8m with no lift. Fully straight through the whole
-        descend+align is the ONE configuration that repeatedly, reliably
-        left the object completely undisturbed all night -- confirmed via
-        ground-truth position checks, not just visually. Curling only
-        happens afterward, once aligned -- see execute_grasp / the finger
-        alignment sequence.
+        """PRESHAPE phase (2026-10-16, user: "keep the thumb from closing and
+        moving towards the palm, keep the palm open"). Thumb is now
+        genuinely open (curl 0.0) and rotated into opposition (Yaw/Roll),
+        held there through ALL of PRESHAPE and DESCEND -- safe now because
+        DESCEND no longer drives all the way down to the final grasp depth
+        with a fast, open-loop trajectory (see _on_approach_settled): it
+        stops at APPROACH_HEIGHT_ABOVE_M, a height with no realistic contact
+        risk regardless of curl. The final approach (where contact risk
+        actually lives) now happens inside finger_alignment_node.py's
+        descend_and_close(), under the same effort-threshold contact
+        detection the digits already use safely, so an open thumb gets
+        caught gently on first contact instead of swept into a fast
+        collision -- this is what makes "stay open" safe here, where it
+        wasn't safe for the fast pre-planned descent this session tried
+        earlier.
 
-        Only publishes CLOSING_JOINTS|PITCH_JOINTS -- NOT Yaw/Roll. Confirmed
-        live 2026-09-17: bundling a joint meant to stay at 0 (Pitch) into the
-        same multi-joint trajectory point as Yaw/Roll actively moving (this
-        used to pull those from current_finger_targets too) let the
-        stationary joint visibly bulge mid-motion, a trajectory-
-        interpolation artifact -- not a real curl command. Yaw/Roll's real
-        target gets set moments later by finger_alignment_node.py's own
-        align step anyway, so there's no need to touch them here at all."""
+        Only publishes CLOSING_JOINTS|PITCH_JOINTS plus thumb Yaw/Roll in
+        ONE message -- confirmed live 2026-09-17: splitting a stationary
+        joint from an actively-moving one across two trajectory messages let
+        the stationary one visibly bulge mid-motion (interpolation
+        artifact)."""
         if not self.current_finger_targets:
             return
 
-        # RAW radians, sent DIRECTLY -- no normalized->radians conversion.
-        # FOUND THE ACTUAL BUG (2026-09-17): the conversion this used to go
-        # through, hi - value*(hi-lo), maps value=0.0 to raw=hi -- and hi is
-        # the joint's MAXIMUM (fully curled) limit, confirmed by continuously
-        # monitoring real /joint_states: every finger joint sat pegged at
-        # its exact upper limit (1.309/1.047 rad) throughout, not at 0. That
-        # inverted convention (copied from an older comment in this file)
-        # was simply wrong for this call site. Raw 0.0 -- confirmed correct
-        # independently via forward-kinematics math on the URDF and a bare
-        # ros2 topic pub test earlier -- is genuinely straight.
-        targets = {j: 0.0 for j in (CLOSING_JOINTS | PITCH_JOINTS)}  # fully straight, no curl at all
-        # ONE message with claw + fan together: a second trajectory message
-        # replaces the first before it moves, so the joints in the first one
-        # (the claw curl) would silently stay at 0.
+        # RAW radians, sent DIRECTLY -- no normalized->radians conversion
+        # (confirmed correct independently via FK + a bare topic-pub test,
+        # 2026-09-17).
+        targets = {j: 0.0 for j in (CLOSING_JOINTS | PITCH_JOINTS)}  # fingers AND thumb fully straight/open
         targets.update(PRE_DESCENT_FAN_RAD)
         targets["R_Thumb_Yaw"] = PRE_DESCENT_THUMB_YAW_RAD
         targets["R_Thumb_Roll"] = PRE_DESCENT_THUMB_ROLL_RAD
-        # Protective thumb curl ONLY (2026-10-09): confirmed live that even
-        # at the best Yaw/Roll, a fully STRAIGHT thumb hits the apple during
-        # descent (R_Thumb_Yaw effort spiked to 37.4, apple pushed ~11cm --
-        # the thumb is simply longer than the palm is thick; swept the full
-        # Pitch/Flexor/DIP range offline and c=0.6 is the minimum that pulls
-        # the tip back within the palm's own envelope). Fingers stay fully
-        # straight (0.0, unchanged above) -- they only grazed at ~0.6
-        # effort, not a real collision; this is thumb-specific. Straightens
-        # back out in finger_alignment_node.py's align step once settled.
-        for j in ("R_Thumb_Pitch", "R_Thumb_Flexor", "R_Thumb_DIP"):
-            targets[j] = PRE_DESCENT_THUMB_CURL
         traj = JointTrajectory()
         traj.joint_names = list(targets.keys())
         point = JointTrajectoryPoint()
@@ -1260,7 +1319,11 @@ class VisionIKOverheadClosedLoopNode(Node):
         point.time_from_start.nanosec = int((HAND_OPEN_DURATION_SEC % 1) * 1e9)
         traj.points.append(point)
         self.hand_traj_pub.publish(traj)
-        self.get_logger().info("Pre-shaped hand: claw curl + fan in one command ahead of grasp.")
+        self._preshape_targets = dict(targets)
+        self.get_logger().info(
+            f"[phase] PRESHAPE commanded: thumb curl=0.0 (open) "
+            f"yaw={PRE_DESCENT_THUMB_YAW_RAD} roll={PRE_DESCENT_THUMB_ROLL_RAD}, finger curl=0.0 (straight)."
+        )
 
     def execute_grasp(self):
         if not self.current_finger_targets:
