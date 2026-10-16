@@ -170,8 +170,17 @@ CLOSE_AMOUNT_DIP = 0.65
 # sweep through) and is the prime suspect. Isolating it: thumb stays fully
 # extended through the whole close, only the four fingers move, to see
 # whether the systematic push goes away.
-CLOSE_AMOUNT_THUMB_PITCH_FLEXOR = 0.8
-CLOSE_AMOUNT_THUMB_DIP = 0.55
+# REVERSED (2026-10-16, see close_hand's thumb_curl_reversed comment): these
+# are now the LOW target the thumb curl ramps DOWN toward from
+# PRE_DESCENT_THUMB_CURL, not a high target ramped up toward. FK-verified
+# (thumb_search5.py) that the thumb's closest approach to the NEW
+# GRASP_POINT_IN_HAND_M (see vision_ik_overhead_closed_loop.py) happens
+# around curl=0.3-0.4 rad regardless of yaw/roll; 0.15 sits below that so the
+# downward ramp is guaranteed to cross the real contact zone before hitting
+# this floor (contact's effort-triggered freeze will stop it before it gets
+# this low in practice).
+CLOSE_AMOUNT_THUMB_PITCH_FLEXOR = 0.15
+CLOSE_AMOUNT_THUMB_DIP = 0.15
 
 # Object-size band this hand can plausibly wrap around (matches
 # yolo_depth_detector.py's MIN/MAX_OBJECT_WIDTH_M filter).
@@ -191,15 +200,28 @@ MAX_OBJECT_WIDTH_M = 0.16
 YAW_BASE_OUTER_RAD = 0.22
 MAX_YAW_SPREAD_RAD = 0.12  # additional spread at the largest graspable size
 GRIP_FAN_OUTER_RAD = 0.28  # outer finger yaw = +/-0.14 -- narrowed hard: side_camera showed the wide fan curling AWAY from the apple instead of converging onto it; only the zero-yaw Middle finger ever made contact
-THUMB_YAW_RAD = -0.35  # opposed/close-ready value -- only reached gradually during close_hand now
-THUMB_ROLL_RAD = -0.20  # rotated further toward opposing the fingers (was -0.10)
+# Thumb Yaw/Roll swing REMOVED (2026-10-16): FK-verified the thumb's
+# curl-only sweep (see thumb_curl_reversed in close_hand) already passes
+# through the real contact zone at the current PRE_DESCENT yaw/roll, with no
+# swing needed -- set equal to the pre-descent values so the swing code path
+# is a no-op rather than ripping it out.
+THUMB_YAW_RAD = -0.5
+THUMB_ROLL_RAD = -0.34
 # Must match vision_ik_overhead_closed_loop.py's PRE_DESCENT_THUMB_YAW_RAD /
 # PRE_DESCENT_THUMB_ROLL_RAD -- the thumb's pose is set there once, before
 # descent, and this node must know what it already is to animate FROM it
 # during close (duplicated since the two processes don't share state).
 PRE_DESCENT_THUMB_YAW_RAD = -0.5
 PRE_DESCENT_THUMB_ROLL_RAD = -0.34
-PRE_DESCENT_THUMB_CURL = 0.65  # must match vision_ik_overhead_closed_loop.py's constant of the same name
+# RAISED 0.65 -> 0.95 (2026-10-16): after GRASP_POINT_IN_HAND_M moved further
+# into the hand, the old 0.65 resting curl -- safe for the PREVIOUS grasp
+# point -- produced a hard live collision during descent (thumb effort
+# -21.94, apple displaced 22mm) against the new one. FK (segment-distance,
+# not just joint origins) sweep shows 0.65 was already only "tight" (~0.056m
+# vs the apple's 0.04m radius) at this grasp point, and the live mesh
+# collision confirms that margin wasn't real; 0.95 gives ~0.068m, double the
+# modeled margin. Must match vision_ik_overhead_closed_loop.py's constant.
+PRE_DESCENT_THUMB_CURL = 0.95
 
 
 class FingerAlignmentNode(Node):
@@ -485,6 +507,18 @@ class FingerAlignmentNode(Node):
                     hit_count[name] += 1
                 else:
                     hit_count[name] = 0
+                # Thumb curl runs BACKWARD (decreasing) from its high,
+                # descent-safe resting value toward a low target -- confirmed
+                # via FK sweep (2026-10-16) that this thumb's closest approach
+                # to the apple, at ANY yaw/roll, occurs at a MODERATE curl
+                # (~0.3-0.4 rad), with distance increasing again at higher
+                # curl. Since curl only ever moves one direction per tick,
+                # starting high (safe for descent) and ramping UP (the old
+                # behavior) only moves further away and never reaches contact
+                # -- confirmed live, the thumb never touched after the
+                # grasp-point relocation. Ramping DOWN from the safe resting
+                # value instead passes back through that contact zone.
+                thumb_curl_reversed = name.startswith("R_Thumb")
                 if hit_count[name] >= 1:
                     # SECURE as a RAMP of the same small step size used
                     # before contact, not one big jump -- confirmed live
@@ -492,7 +526,10 @@ class FingerAlignmentNode(Node):
                     # jump was enough on its own to shove the apple out of
                     # the other fingers' reach before they arrived.
                     if squeeze_ticks[name] < SECURE_SQUEEZE_TICKS:
-                        current[name] = min(targets[name], current[name] + CLOSE_STEP_RAD)
+                        if thumb_curl_reversed:
+                            current[name] = max(targets[name], current[name] - CLOSE_STEP_RAD)
+                        else:
+                            current[name] = min(targets[name], current[name] + CLOSE_STEP_RAD)
                         squeeze_ticks[name] += 1
                         any_moving = True
                         self.get_logger().info(f"{name} contact (effort {effort:.2f}) -- securing, now {current[name]:.2f} rad.")
@@ -500,7 +537,11 @@ class FingerAlignmentNode(Node):
                         frozen[name] = True
                         self.get_logger().info(f"{name} holding (secure) at {current[name]:.2f} rad.")
                     continue
-                if current[name] < targets[name]:
+                if thumb_curl_reversed:
+                    if current[name] > targets[name]:
+                        current[name] = max(targets[name], current[name] - CLOSE_STEP_RAD)
+                        any_moving = True
+                elif current[name] < targets[name]:
                     current[name] = min(targets[name], current[name] + CLOSE_STEP_RAD)
                     any_moving = True
 
@@ -544,9 +585,21 @@ class FingerAlignmentNode(Node):
                     if tips_world and apple_gt:
                         apple_z = apple_gt[2]
                         for name, pos in tips_world.items():
-                            below = pos[2] < apple_z
+                            # _closed_fingertips_world's wrist_pos comes from
+                            # _arm_fk(), which is base_link-frame (ikpy's
+                            # base_elements=["base_link"]), while apple_gt is
+                            # WORLD frame from `ign topic`. BUG (found
+                            # 2026-10-16): these were compared directly with
+                            # no offset, silently reporting "BELOW (OK)" for
+                            # tips that were actually ~0.3m off and in fact
+                            # ABOVE the apple. Base_link sits
+                            # BASE_LINK_HEIGHT_ABOVE_GROUND_M above world
+                            # ground (established elsewhere this project as
+                            # 0.285m) -- add it before comparing.
+                            pos_z_world = pos[2] + 0.285
+                            below = pos_z_world < apple_z
                             self.get_logger().info(
-                                f"[verify] {name} tip z = {pos[2]:.3f}m vs apple centroid z = {apple_z:.3f}m: "
+                                f"[verify] {name} tip world z = {pos_z_world:.3f}m vs apple centroid z = {apple_z:.3f}m: "
                                 f"{'BELOW (OK)' if below else 'ABOVE -- will slip out on lift'}"
                             )
                     self._observe("secure_grip_done", object_name, {"contact_links": contact_links})

@@ -259,7 +259,7 @@ DESCENT_WAYPOINTS = 5  # intermediate IK solves from approach height down to the
 # achievable position, used only during the open-handed approach/descent.
 PRE_DESCENT_THUMB_YAW_RAD = -0.5
 PRE_DESCENT_THUMB_ROLL_RAD = -0.34
-PRE_DESCENT_THUMB_CURL = 0.65  # RAW radians (same convention as everywhere else in this file: 0.0=straight) for Pitch/Flexor/DIP; 0.6 was the measured minimum to clear the palm envelope, this adds a small margin
+PRE_DESCENT_THUMB_CURL = 0.95  # RAISED 0.65 -> 0.95 (2026-10-16, must match finger_alignment_node.py's constant of the same name): 0.65 was tuned against the OLD GRASP_POINT_IN_HAND_M; after relocating the grasp point, 0.65 produced a hard live thumb-apple collision during descent (confirmed: effort -21.94, apple displaced 22mm). FK segment-distance sweep showed 0.65 was only ~0.056m clear (apple radius 0.04m) at the new point -- not enough real margin. 0.95 gives ~0.068m. See finger_alignment_node.py's close_hand() thumb_curl_reversed comment for how contact is still achieved: the thumb now ramps DOWN from this resting value during close (not up), since FK shows its closest approach to the apple happens at a MODERATE curl (~0.3-0.4), not the max.
 OBSERVE_DIR_IK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "approach_observations")
 # ikpy's end frame is at the same point as dexhand_base_link (measured via TF),
 # rotated by a fixed 180 deg about X.
